@@ -1,0 +1,5 @@
+altair==5.1.1
+pandas==2.2.2
+reportlab==4.4.4
+streamlit==1.28.2
+reportlab==4.4.4

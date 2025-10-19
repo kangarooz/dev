@@ -1,0 +1,13 @@
+city,country,region,population_millions,gdp_per_capita_usd,road_quality_index,power_grid_stability,water_security,healthcare_capacity,disaster_preparedness_score,latitude,longitude
+Metropolis,Country A,Northern,8.2,42000,62,55,70,68,58,45.12,-73.84
+Harborview,Country A,Coastal,3.5,36000,55,60,65,72,62,40.56,-70.22
+Highland,Country A,Mountain,1.8,28000,48,50,58,60,52,47.89,-75.15
+Rivergate,Country A,Central,5.1,33000,57,45,62,66,55,43.77,-72.04
+Sunfield,Country A,Western,2.6,31000,53,58,60,64,59,42.11,-74.5
+Stonebridge,Country B,Northern,6.4,25000,45,42,50,56,48,49.32,-71.3
+Lakeshore,Country B,Central,4.9,22000,50,48,55,58,50,46.2,-69.85
+Eastport,Country B,Coastal,3.2,24000,46,44,52,54,47,41.02,-68.7
+Cedarfall,Country B,Mountain,1.4,20000,44,40,48,50,45,48.76,-73.4
+Southgate,Country C,Southern,7.6,18000,38,35,45,52,40,37.85,-71.95
+Greenfield,Country C,Central,5.7,19500,42,38,47,55,43,39.9,-72.8
+Brighton,Country C,Coastal,2.9,20500,40,36,46,53,42,36.6,-70.6

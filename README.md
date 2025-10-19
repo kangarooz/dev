@@ -36,6 +36,28 @@ visualizations to prioritize investment.
 The app loads the sample dataset located at `data/city_infrastructure_sample.csv`.
 You can replace it with your own file as long as you preserve the column names.
 
+### Running in Docker
+
+If you prefer to run the dashboard inside a container, use the provided `Dockerfile`.
+
+1. Build the image from the project root:
+
+   ```bash
+   docker build -t infrastructure-risk-radar .
+   ```
+
+2. Run the container, publishing Streamlit's port to your host:
+
+   ```bash
+   docker run --rm -p 8501:8501 infrastructure-risk-radar
+   ```
+
+3. Open http://localhost:8501/ in your browser to access the app. The container mounts the
+   application code baked into the image; rebuild the image if you change source files.
+
+To override the port, supply an alternate mapping (for example `-p 9000:8501`) and browse to the
+host port you selected.
+
 ## Repository structure
 
 ```

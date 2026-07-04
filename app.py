@@ -10,6 +10,8 @@ import altair as alt
 import pandas as pd
 import streamlit as st
 
+from food_tracker import render_food_tracker
+
 DATA_PATH = Path(__file__).parent / "data" / "city_infrastructure_sample.csv"
 
 
@@ -243,9 +245,14 @@ def main() -> None:
     weights = render_sidebar(df)
 
     scores = compute_risk_scores(df, weights)
-    render_overview(scores)
-    render_city_table(scores)
-    render_visuals(scores)
+
+    risk_tab, food_tab = st.tabs(["Infrastructure Risk", "Food Tracking"])
+    with risk_tab:
+        render_overview(scores)
+        render_city_table(scores)
+        render_visuals(scores)
+    with food_tab:
+        render_food_tracker()
 
 
 if __name__ == "__main__":

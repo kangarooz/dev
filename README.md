@@ -13,6 +13,8 @@ visualizations to prioritize investment.
 - Categorizes each city into Low/Moderate/High risk levels.
 - Provides interactive tables and visualizations (risk ranking, scatter diagnostics, geographic view).
 - Allows scenario analysis via adjustable weights for each risk pillar.
+- Includes a lightweight Food Tracking tab to log meals and track daily calories
+  (entries persist to `data/food_log.csv`).
 
 ## Getting started
 

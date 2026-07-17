@@ -102,10 +102,11 @@ def _xform(location=(0.0, 0.0, 0.0), roll=0.0, pitch=0.0, yaw=0.0):
 
     The unreal.Transform constructor accepts a Rotator for its `rotation` argument and
     converts it to the internal quaternion, which avoids any Rotator->Quat ambiguity.
+    The constructor's location kwarg is `location` (the stored struct field is `translation`).
     """
     return unreal.Transform(
+        location=_vec(*location),
         rotation=unreal.Rotator(roll=float(roll), pitch=float(pitch), yaw=float(yaw)),
-        translation=_vec(*location),
         scale=_vec(1.0, 1.0, 1.0),
     )
 
@@ -476,18 +477,16 @@ def build_mesh_description():
 
     path = "%s/SM_%s" % (CONFIG["package_path"], prefix)
     tools = unreal.AssetToolsHelpers.get_asset_tools()
-    try:
-        static_mesh = tools.create_asset(
-            "SM_%s" % prefix, CONFIG["package_path"], unreal.StaticMesh,
-            unreal.StaticMeshFactory(),
-        )
-    except AttributeError:
-        raise RuntimeError(
-            "unreal.StaticMeshFactory is unavailable in this engine version. "
-            "Enable the 'Geometry Script' plugin and use the geometry_script backend instead."
-        )
+    # StaticMesh has no dedicated Python factory; create_asset accepts a null factory
+    # (None) and produces an empty asset of the given class to build into.
+    static_mesh = tools.create_asset(
+        "SM_%s" % prefix, CONFIG["package_path"], unreal.StaticMesh, None
+    )
     if static_mesh is None:
-        raise RuntimeError("Failed to create StaticMesh asset at %s" % path)
+        raise RuntimeError(
+            "Failed to create an empty StaticMesh asset at %s. If this persists, enable the "
+            "'Geometry Script' plugin and use build(backend='geometry_script') instead." % path
+        )
 
     static_mesh.build_from_static_mesh_descriptions([smd], build_simple_collision=True, fast_build=True)
     static_mesh.set_material(0, base_mic)

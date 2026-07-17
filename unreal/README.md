@@ -83,8 +83,9 @@ it to a UE-supported format first — 3MF has no native importer:
 
 ## Notes & limitations
 
-- Every `unreal.*` call was verified against the official UE 5.3/5.4 Python API docs. A couple of
-  version-sensitive spots (`unreal.Transform` rotation arg, `unreal.StaticMeshFactory`,
-  actor attachment) are guarded with `try/except` and log a clear message if unavailable.
+- Every `unreal.*` call was verified against the official UE 5.3/5.4 Python API docs (including an
+  adversarial pass that corrected the `unreal.Transform` `location` kwarg and the empty-StaticMesh
+  creation — there is no `StaticMeshFactory` in Python, so a null factory is used). Actor
+  attachment is guarded with `try/except` and logs a clear message if unavailable.
 - The script could not be executed inside a live editor from the authoring environment, so the
   dimensions produce a *plausible* perch. Tune `CONFIG` to match the real part.

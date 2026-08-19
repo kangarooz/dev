@@ -14,13 +14,16 @@ STATE: The pipeline lives in a Gmail draft, subject exactly
 "JOBSEARCH-PIPELINE-STATE v1 (do not send or delete)". Load Gmail tools via
 ToolSearch ("+gmail draft search thread"). Find that draft (list_drafts),
 parse the JSON body (schema: version, last_scan_utc, target_comp,
-opportunities[]). If the draft is missing, rebuild best-effort state with a
+opportunities[] for active records, closed_index[] for terminal ones kept
+for dedup). If the draft is missing, rebuild best-effort state with a
 14-day sweep and create the draft anew.
 
 SCAN — search Gmail for job-search activity newer than last_scan_utc:
 1. ATS senders: greenhouse-mail.io, ashbyhq.com, lever.co, gem.com,
-   myworkday.com, icims.com, smartrecruiters.com, plus company no-reply
-   recruiting addresses.
+   myworkday.com, icims.com, smartrecruiters.com, exiger.com, plus company
+   no-reply recruiting addresses.
+1b. Assessment platforms: hackerrank.com, codesignal.com, karat.com,
+   coderpad.io, hirevue.com, micro1.ai — new invites, reminders, expiries.
 2. Every contact email already present in opportunities[].contacts.
 3. LinkedIn: inmail-hit-reply@, hit-reply@, messaging-digest-noreply@,
    messages-noreply@linkedin.com. Job alerts (jobalerts-noreply@) only when
@@ -33,7 +36,9 @@ SCAN — search Gmail for job-search activity newer than last_scan_utc:
 6. in:sent — the user's own replies, to flip last_direction and mark answered
    items done.
 7. Generic net: (interview OR availability OR "next steps" OR offer OR salary
-   OR compensation) -from:linkedin.com, excluding marketing senders.
+   OR compensation) -from:linkedin.com, excluding marketing senders; plus one
+   in:anywhere pass per run for recruiter mail misrouted to Spam/Promotions
+   (read only — never unmark/relabel).
 
 UPDATE — for each hit, match to an existing opportunity by contact email,
 company, or thread id (create one only for genuinely new opportunities):

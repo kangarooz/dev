@@ -2,47 +2,220 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Job application pipeline state",
   "type": "object",
-  "required": ["version", "last_scan_utc", "target_comp", "opportunities"],
+  "required": [
+    "version",
+    "last_scan_utc",
+    "target_comp",
+    "opportunities"
+  ],
   "properties": {
-    "version": { "const": 1 },
-    "last_scan_utc": { "type": "string", "description": "ISO timestamp of the last completed scan; next run searches newer_than this" },
+    "version": {
+      "const": 1
+    },
+    "last_scan_utc": {
+      "type": "string",
+      "description": "ISO timestamp of the last completed scan; next run searches newer_than this"
+    },
     "target_comp": {
       "type": "object",
       "properties": {
-        "min": { "type": "number" },
-        "max": { "type": "number" },
-        "basis": { "enum": ["base", "total_comp", "unconfirmed"] },
-        "current_base": { "type": "number", "description": "comp at current employer; the effective floor" }
+        "min": {
+          "type": "number"
+        },
+        "max": {
+          "type": "number"
+        },
+        "basis": {
+          "enum": [
+            "base",
+            "total_comp",
+            "unconfirmed"
+          ]
+        },
+        "current_base": {
+          "type": "number",
+          "description": "comp at current employer; the effective floor"
+        }
       }
     },
     "opportunities": {
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["id", "company", "role", "stage", "last_activity_date"],
+        "required": [
+          "id",
+          "company",
+          "role",
+          "stage",
+          "last_activity_date"
+        ],
         "properties": {
-          "id": { "type": "string", "description": "slug: company-role, stable across runs" },
-          "company": { "type": "string" },
-          "role": { "type": "string" },
-          "stage": { "enum": ["prospect", "applied", "recruiter_outreach", "interview_requested", "interviewing", "offer", "accepted", "rejected", "withdrawn", "stale"] },
-          "in_band": { "enum": ["yes", "no", "unknown"], "description": "does known comp clear target_comp?" },
+          "id": {
+            "type": "string",
+            "description": "slug: company-role, stable across runs"
+          },
+          "company": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "stage": {
+            "enum": [
+              "prospect",
+              "applied",
+              "recruiter_outreach",
+              "interview_requested",
+              "interviewing",
+              "offer",
+              "accepted",
+              "rejected",
+              "withdrawn",
+              "stale"
+            ]
+          },
+          "in_band": {
+            "enum": [
+              "yes",
+              "no",
+              "unknown"
+            ],
+            "description": "does known comp clear target_comp?"
+          },
           "salary": {
             "type": "object",
             "properties": {
-              "stated": { "type": "string", "description": "verbatim numbers with attribution and date" },
-              "asked": { "type": "boolean", "description": "has Nick asked for the range yet?" }
+              "stated": {
+                "type": "string",
+                "description": "verbatim numbers with attribution and date"
+              },
+              "asked": {
+                "type": "boolean",
+                "description": "has Nick asked for the range yet?"
+              }
             }
           },
-          "contacts": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "email": { "type": "string" }, "channel": { "enum": ["gmail", "outlook", "linkedin"] } } } },
-          "thread_ids": { "type": "array", "items": { "type": "string" }, "description": "Gmail thread ids" },
-          "last_activity_date": { "type": "string" },
-          "last_direction": { "enum": ["inbound", "outbound"] },
-          "meetings": { "type": "array", "items": { "type": "object", "properties": { "when": { "type": "string" }, "what": { "type": "string" }, "status": { "enum": ["proposed", "scheduled", "done", "cancelled"] } } } },
-          "deadline": { "type": "string", "description": "availability window, offer expiry, etc." },
-          "action_needed": { "type": "string", "description": "what Nick must do next; empty when ball is in their court" },
-          "history": { "type": "array", "items": { "type": "string" }, "description": "append-only one-liners: date - event" },
-          "source": { "type": "string" },
-          "notes": { "type": "string" }
+          "contacts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "email": {
+                  "type": "string"
+                },
+                "channel": {
+                  "enum": [
+                    "gmail",
+                    "outlook",
+                    "linkedin"
+                  ]
+                }
+              }
+            }
+          },
+          "thread_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Gmail thread ids"
+          },
+          "last_activity_date": {
+            "type": "string"
+          },
+          "last_direction": {
+            "enum": [
+              "inbound",
+              "outbound"
+            ]
+          },
+          "meetings": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "when": {
+                  "type": "string"
+                },
+                "what": {
+                  "type": "string"
+                },
+                "status": {
+                  "enum": [
+                    "proposed",
+                    "scheduled",
+                    "done",
+                    "cancelled"
+                  ]
+                }
+              }
+            }
+          },
+          "deadline": {
+            "type": "string",
+            "description": "availability window, offer expiry, etc."
+          },
+          "action_needed": {
+            "type": "string",
+            "description": "what Nick must do next; empty when ball is in their court"
+          },
+          "history": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "append-only one-liners: date - event"
+          },
+          "source": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "closed_index": {
+      "type": "array",
+      "description": "Terminal (rejected/stale/withdrawn) records kept compact for dedup: id, company, role, stage, last_activity_date, up to 2 thread_ids.",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "company",
+          "stage",
+          "last_activity_date"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "company": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string"
+          },
+          "stage": {
+            "enum": [
+              "rejected",
+              "stale",
+              "withdrawn"
+            ]
+          },
+          "last_activity_date": {
+            "type": "string"
+          },
+          "thread_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2
+          }
         }
       }
     }

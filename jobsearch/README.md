@@ -60,6 +60,12 @@ this repo). From any Claude Code session on this account:
 
 Default cadence: 12:00 & 20:00 UTC daily (8am & 4pm US Eastern in summer).
 
+Deployed trigger: `trig_01Q384AbNhfRGWgmRoioAj8s`, bound to the session that
+built this system (self-bind mode) because this org plan cannot attach the
+Gmail connector to fresh-session Routines. If firings ever report missing
+Gmail tools, recreate the Routine from the claude.ai Routines UI, which can
+attach connectors directly.
+
 ## Ground rules baked into the agent
 
 - Read-only on the mailbox except the one state draft. It never sends email,

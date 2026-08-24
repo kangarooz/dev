@@ -52,6 +52,8 @@ company, or thread id (create one only for genuinely new opportunities):
 - Flag follow-ups: last message inbound and unanswered >3 days; availability
   request pending; deadline within 72h.
 
+WRITE-BACK SERIALIZATION (learned Aug 24): serialize the JSON with NON-ASCII CHARACTERS LEFT LITERAL (Python json.dump ensure_ascii=False), never as \uXXXX escapes. Gmail's draft round-trip mangles backslash-escape sequences into lone backslashes, corrupting the JSON on read-back — this caused repeated first-write failures until dashes (—/–) were stored literally. Always read the draft back after update_draft and confirm it re-parses as JSON; retry once if not.
+
 WRITE-BACK: update the state draft with the new JSON (update_draft), setting
 last_scan_utc to now. The mailbox is otherwise READ-ONLY for you: never send
 mail, never reply, never trash/label, never create any other draft.

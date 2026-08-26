@@ -1,0 +1,14 @@
+{
+  "name": "socrates-walkthrough-recorder",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Turns the Socrates SA onboarding walkthrough scripts into recorded training videos.",
+  "bin": { "record": "./bin/record.mjs" },
+  "scripts": {
+    "record": "node bin/record.mjs",
+    "auth": "node bin/record.mjs auth",
+    "verify": "node bin/record.mjs record --target fixture --episode 00 --fast"
+  },
+  "dependencies": { "playwright": "^1.56.1" }
+}

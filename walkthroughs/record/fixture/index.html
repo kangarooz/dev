@@ -301,7 +301,13 @@
     addMessage('user', escapeHtml(text));
     composer.value = '';
     const bubble = addMessage('agent', '');
-    stream(bubble, ANSWER, () => { if (!wfBody.querySelector('.step')) renderSteps(); });
+    // Episode 00 pastes the bootstrap, whose last line is "do not do anything further
+    // until prompted". A workflow appearing in the panel would contradict the very
+    // instruction the narration is explaining at that moment.
+    const buildsWorkflow = EPISODE !== '00';
+    stream(bubble, ANSWER, () => {
+      if (buildsWorkflow && !wfBody.querySelector('.step')) renderSteps();
+    });
   }
 
   send.addEventListener('click', doSend);

@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Run inspector — Legion</title>
+<style>
+  /* Episode 07 is entirely about reading execution logs. Narration over a chat screen
+     would be wallpaper; this is the screen the episode is actually describing. */
+  :root {
+    --bg: #0f1319; --panel: #161b23; --panel-2: #1c222c; --line: #2a323f;
+    --ink: #e6ebf2; --dim: #93a1b5; --faint: #64748b;
+    --accent: #4f9cf9; --ok: #3fb950; --warn: #d29922; --bad: #f85149; --skip: #6e7681;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 14px; display: flex; flex-direction: column; -webkit-font-smoothing: antialiased; }
+
+  header { height: 46px; flex: none; display: flex; align-items: center; gap: 14px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 650; } .brand span { color: var(--accent); }
+  .crumb { color: var(--faint); font-size: 13px; }
+  .spacer { flex: 1; }
+
+  main { flex: 1; display: grid; grid-template-columns: 240px 1fr 380px; min-height: 0; }
+  aside, .detail { background: var(--panel); overflow-y: auto; }
+  aside { border-right: 1px solid var(--line); }
+  .detail { border-left: 1px solid var(--line); }
+  h2 { margin: 0; padding: 13px 16px 9px; font-size: 11px; font-weight: 650; letter-spacing: .09em; text-transform: uppercase; color: var(--faint); }
+
+  .run { padding: 10px 16px; border-bottom: 1px solid var(--line); cursor: pointer; }
+  .run.sel { background: var(--panel-2); box-shadow: inset 3px 0 0 var(--accent); }
+  .run .id { font-family: var(--mono); font-size: 12px; color: var(--dim); }
+  .run .st { font-size: 12px; font-weight: 600; margin-top: 3px; }
+  .run .when { font-size: 11px; color: var(--faint); margin-top: 2px; }
+  .st.ok { color: var(--ok); } .st.bad { color: var(--bad); }
+
+  .steps { padding: 12px 16px 30px; overflow-y: auto; }
+  .runhead { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  .runhead h3 { margin: 0; font-size: 17px; font-weight: 600; }
+  .runmeta { color: var(--faint); font-size: 12px; font-family: var(--mono); margin-bottom: 14px; }
+
+  .step {
+    display: grid; grid-template-columns: 16px 1fr 92px 62px; gap: 12px; align-items: center;
+    padding: 11px 12px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--panel-2); margin-bottom: 8px; cursor: pointer;
+  }
+  .step.sel { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,156,249,.16); }
+  .pip { width: 10px; height: 10px; border-radius: 50%; }
+  .pip.ok { background: var(--ok); } .pip.bad { background: var(--bad); }
+  .pip.skipped { background: var(--skip); } .pip.slow { background: var(--warn); }
+  .step .name { font-family: var(--mono); font-size: 13px; }
+  .step .type { color: var(--faint); font-size: 11px; font-family: var(--mono); }
+  .step .status { font-size: 12px; text-align: right; }
+  .status.ok { color: var(--ok); } .status.bad { color: var(--bad); }
+  .status.skipped { color: var(--skip); } .status.slow { color: var(--warn); }
+  .step .dur { font-family: var(--mono); font-size: 12px; color: var(--dim); text-align: right; font-variant-numeric: tabular-nums; }
+
+  .detail .body { padding: 4px 16px 30px; }
+  .kv { margin-bottom: 16px; }
+  .kv .lbl { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); margin-bottom: 6px; }
+  pre {
+    margin: 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.6; white-space: pre-wrap;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 10px 12px; color: var(--ink);
+  }
+  pre.flag { border-color: var(--bad); box-shadow: 0 0 0 2px rgba(248,81,73,.14); }
+  .empty-note { color: var(--bad); font-size: 12px; margin-top: 6px; }
+  .hint { color: var(--faint); font-size: 12px; padding: 16px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Legion <span>·</span> Run Inspector</div>
+  <div class="crumb" id="crumb">it_helpdesk_tier0_agent</div>
+  <div class="spacer"></div>
+  <div class="crumb">last 24h</div>
+</header>
+
+<main>
+  <aside>
+    <h2>Runs</h2>
+    <div id="runs"></div>
+  </aside>
+  <div class="steps" id="steps"></div>
+  <div class="detail">
+    <h2>Step detail</h2>
+    <div class="body" id="detail"><div class="hint">Select a step to inspect its inputs, outputs, status and duration.</div></div>
+  </div>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  // Deterministic fixture data. Two runs: one clean, one carrying the four failure
+  // fingerprints episode 07 teaches — missing state, skipped branch, bad tool config,
+  // and a slow step. Nothing here depends on the clock or on randomness.
+  const RUNS = [
+    {
+      id: 'run_8f21c4', status: 'bad', label: 'Failed', when: 'today 09:41',
+      summary: '6 steps · 1 failed · 1 skipped · 4.9s',
+      steps: [
+        { id: 'user_input', type: 'native:input', status: 'ok', dur: '0.02s',
+          inputs: '{ "message": "cant log in to the vpn client" }',
+          outputs: '{ "user_query": "cant log in to the vpn client" }' },
+        { id: 'retrieve_docs', type: 'native:semantic_search', status: 'ok', dur: '0.31s',
+          inputs: '{ "query": "$state.user_query", "top_k": 5 }',
+          outputs: '{ "search_results": [] }',
+          note: 'Ran fine and returned nothing. Semantic search missed "authentication failure" phrasing.' },
+        { id: 'check_hits', type: 'native:condition', status: 'skipped', dur: '—',
+          inputs: '{ "conditions": [ { "key": "search_results", "op": "not_empty" } ] }',
+          outputs: 'null',
+          note: 'Skipped is not a failure. The condition evaluated false because retrieval was empty.' },
+        { id: 'draft_answer', type: 'native:chat', status: 'ok', dur: '2.80s',
+          inputs: '{ "passages": "", "user_query": "cant log in to the vpn client" }',
+          outputs: '{ "answer_text": "You may need to reset your credentials…" }',
+          flagInputs: true,
+          note: 'The one that matters. It ran with an EMPTY passages input and answered anyway — fluent, confident, unsupported.' },
+        { id: 'attach_sources', type: 'native:attributions', status: 'bad', dur: '0.04s',
+          inputs: '{ "text": "$state.answer_text", "sources": "$state.search_results" }',
+          outputs: 'Error: no sources to attribute',
+          note: 'Failed loudly — but it is the victim, not the culprit. The cause is two steps upstream.' },
+        { id: 'reply', type: 'native:send-message', status: 'skipped', dur: '—',
+          inputs: '{ "body": "$state.cited_answer" }', outputs: 'null' }
+      ]
+    },
+    {
+      id: 'run_8f1d07', status: 'ok', label: 'Succeeded', when: 'today 09:12',
+      summary: '6 steps · all ok · 3.6s',
+      steps: [
+        { id: 'user_input', type: 'native:input', status: 'ok', dur: '0.02s',
+          inputs: '{ "message": "how do I request a new laptop" }',
+          outputs: '{ "user_query": "how do I request a new laptop" }' },
+        { id: 'retrieve_docs', type: 'native:semantic_search', status: 'ok', dur: '0.28s',
+          inputs: '{ "query": "$state.user_query", "top_k": 5 }',
+          outputs: '{ "search_results": [ 4 passages ] }' },
+        { id: 'check_hits', type: 'native:condition', status: 'ok', dur: '0.01s',
+          inputs: '{ "conditions": [ { "key": "search_results", "op": "not_empty" } ] }',
+          outputs: '{ "passed": true }' },
+        { id: 'draft_answer', type: 'native:chat', status: 'ok', dur: '2.61s',
+          inputs: '{ "passages": "[ 4 passages ]", "user_query": "how do I request a new laptop" }',
+          outputs: '{ "answer_text": "Raise an IT request under Hardware…" }' },
+        { id: 'attach_sources', type: 'native:attributions', status: 'ok', dur: '0.06s',
+          inputs: '{ "text": "$state.answer_text", "sources": "[ 4 passages ]" }',
+          outputs: '{ "cited_answer": "…  [1] [2] [3]" }' },
+        { id: 'reply', type: 'native:send-message', status: 'ok', dur: '0.58s',
+          inputs: '{ "body": "$state.cited_answer" }', outputs: '{ "delivered": true }' }
+      ]
+    }
+  ];
+
+  const $ = (id) => document.getElementById(id);
+  let run = RUNS[0];
+  let step = null;
+
+  function renderRuns() {
+    $('runs').innerHTML = '';
+    RUNS.forEach((r) => {
+      const el = document.createElement('div');
+      el.className = 'run' + (r.id === run.id ? ' sel' : '');
+      el.innerHTML = '<div class="id">' + r.id + '</div>' +
+                     '<div class="st ' + r.status + '">' + r.label + '</div>' +
+                     '<div class="when">' + r.when + '</div>';
+      el.addEventListener('click', () => { run = r; step = null; renderAll(); });
+      $('runs').appendChild(el);
+    });
+  }
+
+  function renderSteps() {
+    const host = $('steps');
+    host.innerHTML = '<div class="runhead"><h3>' + run.id + '</h3>' +
+                     '<span class="st ' + run.status + '">' + run.label + '</span></div>' +
+                     '<div class="runmeta">' + run.summary + '</div>';
+    run.steps.forEach((s) => {
+      const el = document.createElement('div');
+      el.className = 'step' + (step && step.id === s.id ? ' sel' : '');
+      el.dataset.stepId = s.id;
+      el.innerHTML = '<span class="pip ' + s.status + '"></span>' +
+                     '<span><span class="name">' + s.id + '</span><br><span class="type">' + s.type + '</span></span>' +
+                     '<span class="status ' + s.status + '">' + s.status + '</span>' +
+                     '<span class="dur">' + s.dur + '</span>';
+      el.addEventListener('click', () => { step = s; renderAll(); });
+      host.appendChild(el);
+    });
+  }
+
+  function renderDetail() {
+    const host = $('detail');
+    if (!step) {
+      host.innerHTML = '<div class="hint">Select a step to inspect its inputs, outputs, status and duration.</div>';
+      return;
+    }
+    host.innerHTML =
+      '<div class="kv"><div class="lbl">Step</div><pre>' + step.id + '   ' + step.type + '</pre></div>' +
+      '<div class="kv"><div class="lbl">Inputs — read these first</div><pre class="' + (step.flagInputs ? 'flag' : '') + '">' +
+        step.inputs + '</pre>' + (step.flagInputs ? '<div class="empty-note">passages is empty — nothing upstream wrote it</div>' : '') + '</div>' +
+      '<div class="kv"><div class="lbl">Outputs</div><pre>' + step.outputs + '</pre></div>' +
+      '<div class="kv"><div class="lbl">Status / duration</div><pre>' + step.status + '   ' + step.dur + '</pre></div>' +
+      (step.note ? '<div class="kv"><div class="lbl">What this tells you</div><pre>' + step.note + '</pre></div>' : '');
+  }
+
+  function renderAll() { renderRuns(); renderSteps(); renderDetail(); }
+
+  window.fixture = {
+    selectRun(which) {
+      const r = RUNS.find((x) => x.id === which) ||
+                RUNS.find((x) => x.status === (which === 'ok' || which === 'success' ? 'ok' : 'bad'));
+      if (r) { run = r; step = null; renderAll(); }
+      return !!r;
+    },
+    selectStep(id) {
+      const s = run.steps.find((x) => x.id === id || x.type.includes(id));
+      if (s) { step = s; renderAll(); document.querySelector('[data-step-id="' + s.id + '"]')?.scrollIntoView({ block: 'center' }); }
+      return !!s;
+    },
+    /** The step episode 07 builds to: ran fine, empty input, confident wrong answer. */
+    showCulprit() { return this.selectStep('draft_answer'); },
+    showSkipped() { return this.selectStep('check_hits'); },
+    reset() { run = RUNS[0]; step = null; renderAll(); }
+  };
+
+  renderAll();
+})();
+</script>
+</body>
+</html>

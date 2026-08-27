@@ -129,7 +129,7 @@ function finishBeat(beat) {
  * @param {string} sourceFile Path used for slug/id and for error messages.
  * @returns {object} Episode matching spec.schema.json.
  */
-export function parseEpisode(markdown, sourceFile) {
+export function parseEpisode(markdown, sourceFile, opts = {}) {
   const named = slugFromFilename(sourceFile);
   if (!named) {
     throw new Error(
@@ -137,7 +137,11 @@ export function parseEpisode(markdown, sourceFile) {
     );
   }
 
-  const lines = String(markdown).split(/\r?\n/);
+  // '[NAME]' is a presenter placeholder in the scripts — a human reading aloud says their
+  // own name there. A recording has no human, so it must be resolved or it renders literally
+  // into a caption as the characters '[NAME]'.
+  const presenter = opts.presenter || 'Claude Code';
+  const lines = String(markdown).replace(/\[NAME\]/g, presenter).split(/\r?\n/);
   const episode = {
     id: named.id,
     slug: named.slug,
@@ -297,7 +301,7 @@ export function validateEpisode(episode) {
  * @param {string} dir Directory holding the NN-*.md scripts.
  * @param {string[]|null} filter Episode ids to keep, e.g. ['00','05']. Null keeps all.
  */
-export async function loadEpisodes(dir, filter = null) {
+export async function loadEpisodes(dir, filter = null, opts = {}) {
   const entries = await readdir(dir);
   const files = entries.filter((f) => /^\d{2}-.+\.md$/.test(f)).sort();
   if (!files.length) throw new Error(`${dir}: no walkthrough scripts (NN-*.md) found`);
@@ -308,7 +312,7 @@ export async function loadEpisodes(dir, filter = null) {
     const id = file.slice(0, 2);
     if (wanted && !wanted.has(id)) continue;
     const full = join(dir, file);
-    episodes.push(parseEpisode(await readFile(full, 'utf8'), full));
+    episodes.push(parseEpisode(await readFile(full, 'utf8'), full, opts));
   }
 
   if (wanted) {

@@ -29,7 +29,7 @@ export default class FixtureTarget extends Target {
   }
 
   async preflight() {
-    for (const file of ['index.html', 'workflow.html']) {
+    for (const file of ['index.html', 'workflow.html', 'terminal.html', 'logs.html']) {
       try {
         await access(join(FIXTURE_DIR, file));
       } catch {
@@ -62,10 +62,8 @@ export default class FixtureTarget extends Target {
   }
 
   async open(page, episode) {
-    const origin = await this.start();
-    // Episode 00 opens on '[SCREEN] Empty terminal' — every other episode opens in the app.
-    const first = episode.workflowPath ? 'workflow.html' : opensInTerminal(episode) ? 'terminal.html' : 'index.html';
-    await this.#goto(page, first);
+    await this.start();
+    await this.#goto(page, openingScreen(episode));
     if (episode.workflowPath) {
       await page.evaluate((p) => window.fixture?.setPath?.(p), episode.workflowPath).catch(() => {});
     }
@@ -73,6 +71,8 @@ export default class FixtureTarget extends Target {
 
   async #goto(page, file) {
     if (this.current === file) return;
+    // this.current keeps the query string so a dataset switch re-navigates; screen
+    // checks elsewhere compare against the bare filename via screenIs().
     await page.goto(`${this.origin}/${file}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
     this.current = file;
   }
@@ -86,6 +86,32 @@ export default class FixtureTarget extends Target {
     const text = (beat.text || '').toLowerCase();
     const code = (beat.code || []).join('\n').trim();
     const has = (...words) => words.some((w) => text.includes(w));
+
+    // The run inspector: episode 07 is entirely about reading execution logs, so its
+    // beats drive a real run rather than narrating over an unrelated screen.
+    if (screenIs(this.current, 'logs.html')) {
+      if (has('run level', 'execution level', 'execution-level', 'overall execution', 'failed run')) {
+        await page.evaluate(() => window.fixture?.selectRun?.('bad')).catch(() => {});
+        return true;
+      }
+      if (has('successful run')) {
+        await page.evaluate(() => window.fixture?.selectRun?.('ok')).catch(() => {});
+        return true;
+      }
+      if (has('skipped')) {
+        await page.evaluate(() => window.fixture?.showSkipped?.()).catch(() => {});
+        return true;
+      }
+      if (has('step level', 'input', 'output', 'symptom', 'debugging workflow', 'fingerprint')) {
+        await page.evaluate(() => window.fixture?.showCulprit?.()).catch(() => {});
+        return true;
+      }
+      if (has('scroll')) {
+        await page.mouse.wheel(0, 300);
+        return true;
+      }
+      return false;
+    }
 
     // Pointing at a step id or state key in the JSON viewer.
     if (ctx.episode.workflowPath) {
@@ -108,7 +134,7 @@ export default class FixtureTarget extends Target {
       await this.#terminal(page, code);
       return true;
     }
-    if (this.current === 'terminal.html' && code && !isShell(code)) {
+    if (screenIs(this.current, 'terminal.html') && code && !isShell(code)) {
       await this.#goto(page, 'index.html');
     }
 
@@ -182,16 +208,38 @@ export default class FixtureTarget extends Target {
   }
 }
 
+/** Compare a screen against a bare filename, ignoring any query string. */
+function screenIs(current, file) {
+  return typeof current === 'string' && current.split('?')[0] === file;
+}
+
 /** Shell, or a prompt for the builder? The two belong on entirely different screens. */
 function isShell(code) {
   return /^\s*(git|cd|ls|npm|npx|node|pip|python3?|export|source|mkdir|cat|exec|py)\b/m.test(code);
 }
 
-/** Episodes whose opening beats are terminal work rather than app work. */
-function opensInTerminal(episode) {
+/**
+ * Which screen an episode opens on. Keyed on what the episode is about rather than its
+ * number, so a renumbered or added script still lands somewhere sensible.
+ */
+function openingScreen(episode) {
+  if (episode.workflowPath) {
+    // Episode 11 teaches how to read a COMPLEX workflow; showing it the compact
+    // teaching example would contradict every word of the narration.
+    return /jira/i.test(episode.workflowPath) ? 'workflow.html?w=jira-assistant' : 'workflow.html';
+  }
+
+  const all = episode.segments.flatMap((s) => s.beats).map((b) => b.text || '').join(' ').toLowerCase();
+  const title = (episode.title || '').toLowerCase();
+
+  // Reading logs is a different screen from talking to the builder.
+  if (/\blogs?\b/.test(title) || /debugger|execution log|failed run|step level/.test(all)) return 'logs.html';
+
   const first = episode.segments[0]?.beats || [];
-  return first.some((b) => /terminal|clone|repo/i.test(b.text || '')) ||
+  const opensOnTerminal =
+    first.some((b) => /terminal|clone|repo/i.test(b.text || '')) ||
     episode.segments.slice(0, 3).some((s) => s.beats.some((b) => b.code && isShell(b.code.join('\n'))));
+  return opensOnTerminal ? 'terminal.html' : 'index.html';
 }
 
 /** Pull a step id or state key out of the beat so the viewer sees the line being named. */

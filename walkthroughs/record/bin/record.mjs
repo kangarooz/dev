@@ -40,6 +40,7 @@ const OPTIONS = {
   headed: { type: 'boolean', default: false },
   'base-url': { type: 'string' },
   'repo-dir': { type: 'string' },
+  presenter: { type: 'string' },
   mp4: { type: 'boolean', default: false },
   'burn-captions': { type: 'boolean', default: false },
   concat: { type: 'boolean', default: false },
@@ -51,7 +52,7 @@ Socrates walkthrough recorder
 
   record   [--target fixture|lol|gitlab] [--episode 00,05 | --all] [--out DIR]
            [--fast] [--headed] [--base-url URL] [--repo-dir PATH]
-           [--mp4] [--burn-captions] [--concat]
+           [--mp4] [--burn-captions] [--concat] [--presenter NAME]
   auth     --target lol|gitlab [--base-url URL]   save a login session for later runs
   list                                            show the episodes and their timings
   check    --target <t>                           preflight only: is the target reachable
@@ -151,7 +152,7 @@ async function cmdAuth(values) {
 async function cmdRecord(values) {
   const outDir = resolve(values.out || DEFAULT_OUT);
   const filter = parseEpisodeFilter(values.episode, values.all);
-  const episodes = await loadEpisodes(SCRIPTS_DIR, filter);
+  const episodes = await loadEpisodes(SCRIPTS_DIR, filter, { presenter: values.presenter });
   const target = await loadTarget(values.target, targetOpts(values));
   const storageState = join(AUTH_DIR, `${values.target}.json`);
 

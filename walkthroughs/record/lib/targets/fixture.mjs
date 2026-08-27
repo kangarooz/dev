@@ -142,11 +142,11 @@ export default class FixtureTarget extends Target {
   async #terminal(page, code) {
     for (const command of code.split('\n').map((s) => s.trim()).filter(Boolean)) {
       await page.evaluate(() => window.fixture?.setCommand?.('')).catch(() => {});
-      for (const ch of command) {
-        await page.evaluate((c) => {
-          const el = document.querySelector('.cmd:last-of-type') || document.querySelectorAll('.cmd')[document.querySelectorAll('.cmd').length - 1];
-          if (el) el.textContent += c;
-        }, ch).catch(() => {});
+      // Drive the live prompt through the fixture's own API. Reaching into the DOM for
+      // '.cmd:last-of-type' looks equivalent and is not: :last-of-type is scoped to
+      // siblings, so it matches an already-rendered line and every keystroke lands there.
+      for (let i = 1; i <= command.length; i++) {
+        await page.evaluate((prefix) => window.fixture?.setCommand?.(prefix), command.slice(0, i)).catch(() => {});
         await page.waitForTimeout(18);
       }
       await page.waitForTimeout(220);

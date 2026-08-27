@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>workflow.json — Legion</title>
+<style>
+  :root {
+    --bg: #0f1319; --panel: #161b23; --line: #2a323f;
+    --ink: #e6ebf2; --dim: #93a1b5; --faint: #64748b;
+    --accent: #4f9cf9; --key: #79c0ff; --str: #a5d6ff; --num: #d2a8ff;
+    --bool: #ff7b72; --punc: #7d8590;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--ink); font-family: var(--sans); display: flex; flex-direction: column; -webkit-font-smoothing: antialiased; }
+  header { height: 46px; flex: none; display: flex; align-items: center; gap: 12px; padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 650; } .brand span { color: var(--accent); }
+  .path { font-family: var(--mono); font-size: 13px; color: var(--dim); }
+  .spacer { flex: 1; }
+  .tag { font-size: 12px; color: var(--faint); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; }
+
+  .code { flex: 1; overflow: auto; padding: 16px 0 40px; }
+  table { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: 14px; line-height: 1.62; }
+  td.ln {
+    width: 56px; text-align: right; padding: 0 14px 0 0; color: var(--faint);
+    user-select: none; vertical-align: top; font-variant-numeric: tabular-nums;
+  }
+  td.src { padding: 0 20px 0 0; white-space: pre; vertical-align: top; }
+  tr.hl { background: rgba(79,156,249,.13); }
+  tr.hl td.ln { color: var(--accent); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+  .k { color: var(--key); } .s { color: var(--str); } .n { color: var(--num); }
+  .b { color: var(--bool); } .p { color: var(--punc); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Legion <span>·</span> workflow-configs</div>
+  <div class="path" id="path">Dev/templated-writing/document-creation/workflow.json</div>
+  <div class="spacer"></div>
+  <div class="tag">read only</div>
+</header>
+<div class="code"><table id="tbl"></table></div>
+
+<script>
+(() => {
+  'use strict';
+  // A small, honest-looking Legion workflow: enough real structure (step ids,
+  // depends_on, conditions, state keys) that episodes 04, 05, 09 and 11 have
+  // something true-shaped to point at on screen.
+  const WORKFLOW = {
+    name: 'document-creation',
+    description: 'Draft a document from source material using a templated writing pass.',
+    initial_state: { template_name: 'mission-brief', tone: 'plain' },
+    persist_keys: ['last_document_id'],
+    steps: [
+      { id: 'intake_sources', type: 'native:input', outputs: ['source_docs'] },
+      { id: 'extract_facts', type: 'native:chat', model: 'gpt-5.4',
+        prompt: 'Extract every factual claim from $state.source_docs as a list.',
+        depends_on: ['intake_sources'], outputs: ['extracted_facts'] },
+      { id: 'have_facts', type: 'native:condition',
+        conditions: [{ key: 'extracted_facts', op: 'not_empty' }] },
+      { id: 'outline_subagent', type: 'native:subagent', workflow: 'Dev/shared/outline-builder',
+        depends_on: ['extract_facts'], conditions: ['have_facts'],
+        inputs: { facts: '$state.extracted_facts', template: '$state.template_name' },
+        outputs: ['document_outline'] },
+      { id: 'write_document', type: 'native:chat', model: 'gpt-5.4',
+        prompt: 'Write the document following $state.document_outline in a $state.tone voice.',
+        depends_on: ['outline_subagent'], outputs: ['document_draft'] },
+      { id: 'attach_sources', type: 'native:attributions',
+        depends_on: ['write_document'], inputs: { text: '$state.document_draft' },
+        outputs: ['cited_document'] },
+      { id: 'deliver', type: 'native:send-message',
+        depends_on: ['attach_sources'], inputs: { body: '$state.cited_document' } }
+    ]
+  };
+
+  // Deliberately hand-rolled: a dependency-free tokeniser keeps the fixture
+  // self-contained, which is the whole point of it.
+  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+  function highlight(line) {
+    let out = '', i = 0;
+    while (i < line.length) {
+      const rest = line.slice(i);
+      let m;
+      if ((m = /^"(?:[^"\\]|\\.)*"(\s*:)?/.exec(rest))) {
+        const isKey = !!m[1];
+        out += '<span class="' + (isKey ? 'k' : 's') + '">' + esc(m[0].replace(/\s*:$/, '')) + '</span>';
+        if (isKey) out += '<span class="p">:</span>';
+        i += m[0].length; continue;
+      }
+      if ((m = /^-?\d+(?:\.\d+)?/.exec(rest))) { out += '<span class="n">' + m[0] + '</span>'; i += m[0].length; continue; }
+      if ((m = /^(true|false|null)\b/.exec(rest))) { out += '<span class="b">' + m[0] + '</span>'; i += m[0].length; continue; }
+      if ((m = /^[{}\[\],]/.exec(rest))) { out += '<span class="p">' + m[0] + '</span>'; i += 1; continue; }
+      out += esc(rest[0]); i += 1;
+    }
+    return out;
+  }
+
+  const lines = JSON.stringify(WORKFLOW, null, 2).split('\n');
+  const tbl = document.getElementById('tbl');
+  const rows = lines.map((line, idx) => {
+    const tr = document.createElement('tr');
+    tr.id = 'L' + (idx + 1);
+    tr.innerHTML = '<td class="ln">' + (idx + 1) + '</td><td class="src">' + highlight(line) + '</td>';
+    tbl.appendChild(tr);
+    return { tr, line };
+  });
+
+  window.fixture = {
+    // Point the camera at a step id or state key and hold it there — episodes 05 and
+    // 09 both call for naming real step ids on screen.
+    highlight(needle) {
+      rows.forEach((r) => r.tr.classList.remove('hl'));
+      const hits = rows.filter((r) => r.line.includes(needle));
+      hits.forEach((r) => r.tr.classList.add('hl'));
+      if (hits.length) hits[0].tr.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return hits.length;
+    },
+    setPath(p) { document.getElementById('path').textContent = p; },
+    lineCount() { return rows.length; },
+    clear() { rows.forEach((r) => r.tr.classList.remove('hl')); }
+  };
+})();
+</script>
+</body>
+</html>

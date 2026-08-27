@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Agent Builder — Legion</title>
+<style>
+  /* Self-contained by design: these files are loaded by a recorder that may have no
+     network at all, and a missing webfont mid-take ruins the recording. */
+  :root {
+    --bg: #0f1319;
+    --panel: #161b23;
+    --panel-2: #1c222c;
+    --line: #2a323f;
+    --ink: #e6ebf2;
+    --ink-dim: #93a1b5;
+    --ink-faint: #64748b;
+    --accent: #4f9cf9;
+    --accent-dim: #1e3a5f;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--ink); font-family: var(--sans);
+    font-size: 15px; line-height: 1.5; display: flex; flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    height: 46px; flex: none; display: flex; align-items: center; gap: 14px;
+    padding: 0 16px; background: var(--panel); border-bottom: 1px solid var(--line);
+  }
+  .brand { font-weight: 650; letter-spacing: .2px; }
+  .brand span { color: var(--accent); }
+  .crumb { color: var(--ink-faint); font-size: 13px; }
+  .spacer { flex: 1; }
+  .who {
+    width: 26px; height: 26px; border-radius: 50%; background: var(--accent-dim);
+    color: var(--accent); display: grid; place-items: center; font-size: 12px; font-weight: 600;
+  }
+
+  main { flex: 1; display: grid; grid-template-columns: 254px 1fr 340px; min-height: 0; }
+
+  aside, .workflow { background: var(--panel); min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+  aside { border-right: 1px solid var(--line); }
+  .workflow { border-left: 1px solid var(--line); }
+
+  .sec { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  .sec h2 {
+    margin: 0 0 10px; font-size: 11px; font-weight: 650; letter-spacing: .09em;
+    text-transform: uppercase; color: var(--ink-faint);
+  }
+
+  label.f { display: block; font-size: 12px; color: var(--ink-dim); margin-bottom: 6px; }
+  select, .btn {
+    width: 100%; font-family: inherit; font-size: 14px; color: var(--ink);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 6px;
+    padding: 9px 11px; appearance: none;
+  }
+  select:focus, .btn:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .btn { cursor: pointer; text-align: center; font-weight: 550; margin-top: 10px; }
+  .btn:hover { background: #232a36; }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #08121f; }
+  .btn.primary:hover { background: #6aabfa; }
+  .btn[disabled] { opacity: .5; cursor: default; }
+
+  .status { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; color: var(--ink-dim); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ink-faint); }
+  .status.active { color: var(--ok); }
+  .status.active .dot { background: var(--ok); box-shadow: 0 0 0 3px rgba(63,185,80,.16); }
+
+  .skills li { list-style: none; font-size: 13px; color: var(--ink-dim); padding: 3px 0; }
+  .skills { margin: 0; padding: 0; }
+  .skills code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+
+  /* ---- chat column ---- */
+  .chat { display: flex; flex-direction: column; min-height: 0; }
+  .transcript { flex: 1; overflow-y: auto; padding: 22px 30px; scroll-behavior: smooth; }
+  .empty { color: var(--ink-faint); text-align: center; margin-top: 16vh; font-size: 14px; }
+  .empty strong { display: block; color: var(--ink-dim); font-size: 16px; margin-bottom: 6px; }
+
+  .msg { margin-bottom: 20px; max-width: 62ch; }
+  .msg .role { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 6px; }
+  .msg.user .bubble {
+    background: var(--accent-dim); border: 1px solid #2b4c76; border-radius: 8px;
+    padding: 11px 14px; white-space: pre-wrap; font-size: 14px;
+  }
+  .msg.agent .bubble { font-size: 15px; }
+  .msg.agent .bubble p { margin: 0 0 11px; }
+  .msg.agent .bubble h4 { margin: 16px 0 7px; font-size: 14px; color: var(--ink); }
+  .msg.agent .bubble code { font-family: var(--mono); font-size: 13px; background: #212934; padding: 1px 5px; border-radius: 4px; }
+  .cursor { display: inline-block; width: 7px; height: 16px; background: var(--accent); vertical-align: -3px; animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  .composer { flex: none; border-top: 1px solid var(--line); padding: 14px 30px 18px; background: var(--panel); }
+  .composer .row { display: flex; gap: 10px; align-items: flex-end; }
+  textarea {
+    flex: 1; resize: none; height: 62px; font-family: inherit; font-size: 14px; color: var(--ink);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 11px 13px;
+  }
+  textarea::placeholder { color: var(--ink-faint); }
+  textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  .send { width: 96px; }
+  .hint { font-size: 12px; color: var(--ink-faint); margin-top: 8px; }
+
+  /* ---- workflow panel ---- */
+  .wf-head { display: flex; align-items: center; justify-content: space-between; }
+  .wf-body { flex: 1; overflow-y: auto; padding: 12px 14px; }
+  .wf-empty { color: var(--ink-faint); font-size: 13px; padding: 10px 2px; }
+  .step {
+    border: 1px solid var(--line); background: var(--panel-2); border-radius: 7px;
+    padding: 10px 12px; margin-bottom: 9px; opacity: 0; transform: translateY(6px);
+    transition: opacity .25s ease, transform .25s ease;
+  }
+  .step.in { opacity: 1; transform: none; }
+  .step .id { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+  .step .kind { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); float: right; }
+  .step .desc { font-size: 13px; color: var(--ink-dim); margin-top: 5px; }
+  .step .meta { font-family: var(--mono); font-size: 11px; color: var(--ink-faint); margin-top: 7px; }
+  .step.highlight { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(79,156,249,.18); }
+  .wf-foot { border-top: 1px solid var(--line); padding: 12px 14px; display: flex; gap: 8px; }
+  .wf-foot .btn { margin-top: 0; font-size: 13px; padding: 7px 9px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">Legion <span>·</span> Agent Builder</div>
+  <div class="crumb">Enablement / workflow-configs</div>
+  <div class="spacer"></div>
+  <div class="who" title="Signed in">SA</div>
+</header>
+
+<main>
+  <aside>
+    <div class="sec">
+      <h2>Builder</h2>
+      <label class="f" for="builder">Agent builder</label>
+      <select id="builder" aria-label="Agent builder">
+        <option value="">Select a builder…</option>
+        <option value="workflow_builder">workflow_builder</option>
+        <option value="doc_builder">doc_builder</option>
+        <option value="eval_builder">eval_builder</option>
+      </select>
+      <button class="btn primary" id="activate" disabled>Activate Builder</button>
+      <div class="status" id="status"><span class="dot"></span><span id="statusText">Inactive</span></div>
+    </div>
+    <div class="sec">
+      <h2>Skills loaded</h2>
+      <ul class="skills">
+        <li><code>socrates-sa-onboarding</code></li>
+        <li><code>legion-agent-builder</code></li>
+      </ul>
+    </div>
+    <div class="sec">
+      <h2>Session</h2>
+      <ul class="skills">
+        <li>Model <code>gpt-5.4</code></li>
+        <li>Repo <code>enablement-workflow-configs</code></li>
+      </ul>
+    </div>
+  </aside>
+
+  <section class="chat">
+    <div class="transcript" id="transcript">
+      <div class="empty" id="empty">
+        <strong>No conversation yet</strong>
+        Select <code>workflow_builder</code>, activate it, then paste your prompt.
+      </div>
+    </div>
+    <div class="composer">
+      <div class="row">
+        <textarea id="composer" placeholder="Ask about building your Agent"></textarea>
+        <button class="btn primary send" id="send">Send</button>
+      </div>
+      <div class="hint" id="hint">Builder inactive — activate a builder before sending.</div>
+    </div>
+  </section>
+
+  <div class="workflow">
+    <div class="sec wf-head">
+      <h2 style="margin:0">Agent Workflow</h2>
+      <span class="crumb" id="stepCount">0 steps</span>
+    </div>
+    <div class="wf-body" id="wfBody">
+      <div class="wf-empty" id="wfEmpty">Steps appear here once the builder accepts a plan.</div>
+    </div>
+    <div class="wf-foot">
+      <button class="btn" id="exportJson">Export JSON</button>
+      <button class="btn" id="saveWf">Save</button>
+    </div>
+  </div>
+</main>
+
+<script>
+(() => {
+  'use strict';
+  // Everything here is deterministic on purpose. A recorded take must be reproducible,
+  // so there is no randomness and no wall-clock dependence anywhere in this fixture.
+  const $ = (id) => document.getElementById(id);
+  const builder = $('builder'), activate = $('activate'), status = $('status'), statusText = $('statusText');
+  const transcript = $('transcript'), empty = $('empty'), composer = $('composer'), send = $('send'), hint = $('hint');
+  const wfBody = $('wfBody'), wfEmpty = $('wfEmpty'), stepCount = $('stepCount');
+
+  let active = false;
+
+  const STEPS = [
+    { id: 'user_input',      kind: 'native:input',           desc: 'Capture the question the user typed.',                    meta: 'writes: user_query' },
+    { id: 'retrieve_docs',   kind: 'native:semantic_search', desc: 'Find passages that answer the question by meaning.',      meta: 'depends_on: user_input · writes: search_results' },
+    { id: 'check_hits',      kind: 'native:condition',       desc: 'Only continue when retrieval actually returned material.', meta: 'conditions: search_results.count > 0' },
+    { id: 'draft_answer',    kind: 'native:chat',            desc: 'Compose the answer from the retrieved passages.',         meta: 'depends_on: retrieve_docs · writes: answer_text' },
+    { id: 'attach_sources',  kind: 'native:attributions',    desc: 'Tie each claim back to the passage it came from.',        meta: 'depends_on: draft_answer · writes: cited_answer' },
+    { id: 'reply',           kind: 'native:send-message',    desc: 'Put the answer in front of the user.',                    meta: 'depends_on: attach_sources' }
+  ];
+
+  const ANSWER = [
+    { h: null, p: 'Here is the shape I would build, and why it comes out in this order.' },
+    { h: 'What this workflow does', p: 'A user asks a question in chat. We retrieve material that might answer it, generate an answer grounded in that material, attach the sources, and send it back. Four moves — everything else is a variation on them.' },
+    { h: 'How execution flows', p: 'The steps never hand data to each other directly. Each one writes to <code>state</code> and the next one reads from it. <code>retrieve_docs</code> writes <code>search_results</code>; <code>draft_answer</code> declares <code>depends_on: retrieve_docs</code> so it cannot start before that key exists.' },
+    { h: 'The beginner mistake', p: 'Leaving out <code>check_hits</code>. Without it, an empty retrieval still flows into the chat step, which answers fluently from nothing. It does not crash — it produces a confident wrong answer, which is far harder to notice.' },
+    { h: 'Next step', p: 'Trace <code>user_query</code> through to <code>cited_answer</code> in the workflow panel and name every step that reads or writes it.' }
+  ];
+
+  function setActive(on) {
+    active = on;
+    status.classList.toggle('active', on);
+    statusText.textContent = on ? 'Builder active' : 'Inactive';
+    activate.textContent = on ? 'Deactivate Builder' : 'Activate Builder';
+    hint.textContent = on
+      ? 'workflow_builder is active — paste a prompt describing the goal, then Send.'
+      : 'Builder inactive — activate a builder before sending.';
+  }
+
+  builder.addEventListener('change', () => { activate.disabled = !builder.value; });
+  activate.addEventListener('click', () => { if (builder.value) setActive(!active); });
+
+  function addMessage(role, html) {
+    if (empty.parentNode) empty.remove();
+    const wrap = document.createElement('div');
+    wrap.className = 'msg ' + role;
+    wrap.innerHTML = '<div class="role">' + (role === 'user' ? 'You' : 'workflow_builder') + '</div>' +
+                     '<div class="bubble"></div>';
+    wrap.querySelector('.bubble').innerHTML = html;
+    transcript.appendChild(wrap);
+    transcript.scrollTop = transcript.scrollHeight;
+    return wrap.querySelector('.bubble');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  }
+
+  // Reveal the answer block by block so a recording shows it arriving rather than
+  // appearing all at once. Fixed cadence — no randomness.
+  function stream(bubble, blocks, done) {
+    let i = 0;
+    const cursor = document.createElement('span');
+    cursor.className = 'cursor';
+    bubble.appendChild(cursor);
+    const tick = () => {
+      if (i >= blocks.length) { cursor.remove(); if (done) done(); return; }
+      const b = blocks[i++];
+      if (b.h) { const h = document.createElement('h4'); h.textContent = b.h; bubble.insertBefore(h, cursor); }
+      const p = document.createElement('p');
+      p.innerHTML = b.p;
+      bubble.insertBefore(p, cursor);
+      transcript.scrollTop = transcript.scrollHeight;
+      setTimeout(tick, 620);
+    };
+    setTimeout(tick, 380);
+  }
+
+  function renderSteps() {
+    wfEmpty.remove();
+    STEPS.forEach((s, i) => {
+      const el = document.createElement('div');
+      el.className = 'step';
+      el.dataset.stepId = s.id;
+      el.innerHTML = '<span class="kind">' + s.kind + '</span><span class="id">' + s.id + '</span>' +
+                     '<div class="desc">' + s.desc + '</div><div class="meta">' + s.meta + '</div>';
+      wfBody.appendChild(el);
+      setTimeout(() => {
+        el.classList.add('in');
+        stepCount.textContent = (i + 1) + ' step' + (i ? 's' : '');
+      }, 300 + i * 260);
+    });
+  }
+
+  function doSend() {
+    const text = composer.value.trim();
+    if (!text) return;
+    if (!active) {
+      addMessage('agent', '<p><strong>Workflow Error:</strong> <code>builder_agent_id not set</code></p>' +
+        '<p>Select <code>workflow_builder</code> from the dropdown and click Activate Builder, then try again.</p>');
+      composer.value = '';
+      return;
+    }
+    addMessage('user', escapeHtml(text));
+    composer.value = '';
+    const bubble = addMessage('agent', '');
+    stream(bubble, ANSWER, () => { if (!wfBody.querySelector('.step')) renderSteps(); });
+  }
+
+  send.addEventListener('click', doSend);
+  composer.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); doSend(); }
+  });
+
+  // Hooks the recorder drives directly, so a target adapter never has to guess at
+  // internal selectors or race the UI's own animations.
+  window.fixture = {
+    selectBuilder(v) { builder.value = v || 'workflow_builder'; activate.disabled = false; builder.dispatchEvent(new Event('change')); },
+    activate() { if (!builder.value) this.selectBuilder('workflow_builder'); if (!active) activate.click(); },
+    isActive() { return active; },
+    send() { doSend(); },
+    stepCount() { return wfBody.querySelectorAll('.step').length; },
+    highlight(stepId) {
+      wfBody.querySelectorAll('.step').forEach((el) => el.classList.remove('highlight'));
+      const el = wfBody.querySelector('[data-step-id="' + stepId + '"]');
+      if (el) { el.classList.add('highlight'); el.scrollIntoView({ block: 'center' }); }
+      return !!el;
+    },
+    reset() {
+      transcript.innerHTML = ''; transcript.appendChild(empty);
+      wfBody.innerHTML = ''; wfBody.appendChild(wfEmpty);
+      stepCount.textContent = '0 steps'; composer.value = '';
+      builder.value = ''; activate.disabled = true; setActive(false);
+    }
+  };
+})();
+</script>
+</body>
+</html>

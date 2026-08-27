@@ -179,8 +179,13 @@ export function parseEpisode(markdown, sourceFile, opts = {}) {
         if (body) {
           if (beat) beat.code.push(body);
           else if (segment && segment.beats.length) {
+            // Every script puts a blank line between the [ACTION] line and its fence,
+            // which closes the beat before the fence is seen. Attaching the code is not
+            // enough — the beat's duration was computed without it, so a four-line block
+            // got the same 2.0s as an empty one while the fixture spent 3s typing it.
             const prev = segment.beats[segment.beats.length - 1];
             (prev.code || (prev.code = [])).push(body);
+            if (prev.kind !== 'hold') prev.estSec = estimateBeatSeconds(prev.kind, prev.text, prev.code);
           }
         }
         fence = null;

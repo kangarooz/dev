@@ -31,6 +31,26 @@ const SEND = [
   'button[aria-label*="send" i]',
 ];
 const BUILDER_SELECT = ['select', '[role="combobox"]', 'button:has-text("Select")'];
+
+/**
+ * The Socrates prompts, keyed by episode. The scripts tell the presenter to paste
+ * "prompt 5"; the text itself lives in the Confluence guide, so the target carries it.
+ * Abridged to the opening paragraph — enough to be recognisable on camera.
+ */
+const PROMPTS = {
+  '01': 'Teach me the most useful onboarding path for a brand-new Solution Architect learning Legion workflows.',
+  '02': 'Teach me the simple FAQ workflow as if I am brand new to Legion. I want a real teaching walkthrough, not a short summary.',
+  '03': 'Explain state management in Legion workflows for a new Solution Architect in a way that makes it feel concrete and usable.',
+  '04': 'Teach me the difference between depends_on and conditions in Legion workflows like I am new but technical.',
+  '05': 'Analyze Dev/templated-writing/document-creation/workflow.json for a brand-new Solution Architect.',
+  '06': 'Compare native:lexical_search and native:semantic_search in a way that helps me actually choose between them.',
+  '07': 'Teach me how to read workflow execution logs like a new Solution Architect who wants to debug with evidence.',
+  '08': 'Show me two workflows from this repo that use native:chat in meaningfully different ways.',
+  '09': 'Analyze Modules/IT HelpDesk/it_helpdesk_tier0_agent.json as a current RAG workflow that uses unified_search.',
+  '10': 'Compare the hybrid search pattern, native:full_text_retrieval, and native:unified_search.',
+  '11': 'Analyze On-Prem Jira Assistant with the mindset of learning from a complex workflow without copying it blindly.',
+  '12': 'Review a first-draft FAQ workflow that uses native:semantic_search, native:chat, and native:send-message.',
+};
 const ACTIVATE = ['button:has-text("Activate")', 'button:has-text("Activate Builder")'];
 
 export default class LolTarget extends Target {
@@ -103,15 +123,21 @@ export default class LolTarget extends Target {
       return true;
     }
 
-    if (code && has('paste', 'type', 'send', 'prompt', 'follow up', 'follow-up')) {
+    // No code fence required. The scripts say "Fresh session, bootstrap, paste prompt 3"
+    // with the prompt text living in the Confluence guide, not in the script — gating on
+    // `code` meant the most important action in every episode never fired on the live
+    // app either. PROMPTS supplies the text when the beat does not.
+    if (has('paste', 'type', 'send', 'prompt', 'follow up', 'follow-up')) {
+      const text = code || PROMPTS[ctx?.episode?.id] || '';
+      if (!text) return false;
       const box = await first(page, COMPOSER);
       if (!box) return false;
       await box.click().catch(() => {});
       await box.fill('').catch(() => {});
       // Type the opening stretch at human cadence so the video shows text arriving,
       // then fill the rest — a 400-character prompt should not cost 40s of runtime.
-      await page.keyboard.type(code.slice(0, 140), { delay: 18 }).catch(() => {});
-      if (code.length > 140) await box.fill(code).catch(() => {});
+      await page.keyboard.type(text.slice(0, 140), { delay: 18 }).catch(() => {});
+      if (text.length > 140) await box.fill(text).catch(() => {});
       await page.waitForTimeout(300);
       const send = await first(page, SEND);
       if (send) await send.click().catch(() => {});
@@ -120,8 +146,15 @@ export default class LolTarget extends Target {
     }
 
     if (has('scroll')) {
-      await page.mouse.wheel(0, 340);
-      return true;
+      // A wheel event with the pointer still at (0,0) lands on the header and scrolls
+      // nothing; move to the middle of the viewport first.
+      const size = page.viewportSize() || { width: 1280, height: 720 };
+      await page.mouse.move(Math.round(size.width / 2), Math.round(size.height / 2)).catch(() => {});
+      const before = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0).catch(() => 0);
+      await page.mouse.wheel(0, 340).catch(() => {});
+      await page.waitForTimeout(220);
+      const after = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0).catch(() => 0);
+      return after !== before;
     }
 
     return false;

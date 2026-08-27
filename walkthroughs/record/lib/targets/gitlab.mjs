@@ -87,8 +87,14 @@ export default class GitlabTarget extends Target {
       if (hit) return true;
     }
     if (text.includes('scroll')) {
-      await page.mouse.wheel(0, 340);
-      return true;
+      // Pointer starts at (0,0), over the header — move it onto the code pane first.
+      const size = page.viewportSize() || { width: 1280, height: 720 };
+      await page.mouse.move(Math.round(size.width / 2), Math.round(size.height / 2)).catch(() => {});
+      const before = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0).catch(() => 0);
+      await page.mouse.wheel(0, 340).catch(() => {});
+      await page.waitForTimeout(220);
+      const after = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0).catch(() => 0);
+      return after !== before;
     }
     return false;
   }

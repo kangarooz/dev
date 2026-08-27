@@ -136,6 +136,34 @@
           depends_on: ['attributions'], inputs: { body: '$state.cited_answer' } }
       ]
     }
+    // Episode 09's subject is unified_search and attributions. It must be able to see
+    // both on screen, or the narration is describing an absent file.
+    'it-helpdesk': {
+      name: 'it_helpdesk_tier0_agent',
+      description: 'Tier-zero IT helpdesk agent answering from internal documentation.',
+      initial_state: { knowledge_base: 'it-helpdesk', min_confidence: 0.45 },
+      persist_keys: ['last_ticket_id'],
+      steps: [
+        { id: 'intake', type: 'native:input', outputs: ['user_query'] },
+        { id: 'retrieve', type: 'native:unified_search',
+          inputs: { query: '$state.user_query', collections: ['$state.knowledge_base'], top_k: 8 },
+          depends_on: ['intake'], outputs: ['search_results'] },
+        { id: 'have_hits', type: 'native:condition',
+          conditions: [{ key: 'search_results', op: 'not_empty' }] },
+        { id: 'answer', type: 'native:chat', model: 'gpt-5.4',
+          prompt: 'Answer $state.user_query using only $state.search_results. Say so if it is not covered.',
+          depends_on: ['retrieve'], conditions: ['have_hits'], outputs: ['answer_text'] },
+        { id: 'no_hits_reply', type: 'native:chat', model: 'gpt-5.4',
+          prompt: 'Explain that the helpdesk documentation does not cover this and offer to raise a ticket.',
+          depends_on: ['retrieve'],
+          conditions: [{ key: 'search_results', op: 'empty' }], outputs: ['answer_text'] },
+        { id: 'cite', type: 'native:attributions',
+          depends_on: ['answer'], inputs: { text: '$state.answer_text', sources: '$state.search_results' },
+          outputs: ['cited_answer'] },
+        { id: 'reply', type: 'native:send-message',
+          depends_on: ['cite'], inputs: { body: '$state.cited_answer' } }
+      ]
+    }
   };
 
   const params = new URLSearchParams(location.search);

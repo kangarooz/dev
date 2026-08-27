@@ -126,6 +126,7 @@
 </style>
 </head>
 <body>
+<script src="content.js"></script>
 <header>
   <div class="brand">Legion <span>·</span> Agent Builder</div>
   <div class="crumb">Enablement / workflow-configs</div>
@@ -215,13 +216,13 @@
     { id: 'reply',           kind: 'native:send-message',    desc: 'Put the answer in front of the user.',                    meta: 'depends_on: attach_sources' }
   ];
 
-  const ANSWER = [
-    { h: null, p: 'Here is the shape I would build, and why it comes out in this order.' },
-    { h: 'What this workflow does', p: 'A user asks a question in chat. We retrieve material that might answer it, generate an answer grounded in that material, attach the sources, and send it back. Four moves — everything else is a variation on them.' },
-    { h: 'How execution flows', p: 'The steps never hand data to each other directly. Each one writes to <code>state</code> and the next one reads from it. <code>retrieve_docs</code> writes <code>search_results</code>; <code>draft_answer</code> declares <code>depends_on: retrieve_docs</code> so it cannot start before that key exists.' },
-    { h: 'The beginner mistake', p: 'Leaving out <code>check_hits</code>. Without it, an empty retrieval still flows into the chat step, which answers fluently from nothing. It does not crash — it produces a confident wrong answer, which is far harder to notice.' },
-    { h: 'Next step', p: 'Trace <code>user_query</code> through to <code>cited_answer</code> in the workflow panel and name every step that reads or writes it.' }
-  ];
+  // Which episode is being recorded decides what the builder says back. A canned
+  // reply about FAQ workflows playing under narration about retrieval trade-offs is
+  // wallpaper; see fixture/content.js.
+  const params = new URLSearchParams(location.search);
+  const EPISODE = params.get('ep') || '02';
+  const CONTENT = window.CONTENT || { prompts: {}, answers: {} };
+  const ANSWER = (CONTENT.answers && CONTENT.answers[EPISODE]) || CONTENT.answers['02'] || [];
 
   function setActive(on) {
     active = on;
@@ -292,10 +293,10 @@
     const text = composer.value.trim();
     if (!text) return;
     if (!active) {
-      addMessage('agent', '<p><strong>Workflow Error:</strong> <code>builder_agent_id not set</code></p>' +
-        '<p>Select <code>workflow_builder</code> from the dropdown and click Activate Builder, then try again.</p>');
-      composer.value = '';
-      return;
+      // The error path still exists and is reachable via fixture.sendInactive(), but a
+      // plain send activates first. The scripts describe a working session, not a
+      // troubleshooting one, so the default has to be the working flow.
+      selectAndActivate();
     }
     addMessage('user', escapeHtml(text));
     composer.value = '';
@@ -310,7 +311,25 @@
 
   // Hooks the recorder drives directly, so a target adapter never has to guess at
   // internal selectors or race the UI's own animations.
+  function selectAndActivate() {
+    if (!builder.value) { builder.value = 'workflow_builder'; activate.disabled = false; }
+    if (!active) setActive(true);
+  }
+
   window.fixture = {
+    episode() { return EPISODE; },
+    prompt() { return EPISODE === '00' ? CONTENT.bootstrap : (CONTENT.prompts && CONTENT.prompts[EPISODE]) || ''; },
+    selectAndActivate,
+    /** Deliberately send with the builder off, to show the known-issues error. */
+    sendInactive() {
+      const text = composer.value.trim();
+      if (!text) return false;
+      addMessage('user', escapeHtml(text));
+      composer.value = '';
+      addMessage('agent', '<p><strong>Workflow Error:</strong> <code>builder_agent_id not set</code></p>' +
+        '<p>Select <code>workflow_builder</code> from the dropdown and click Activate Builder, then try again.</p>');
+      return true;
+    },
     selectBuilder(v) { builder.value = v || 'workflow_builder'; activate.disabled = false; builder.dispatchEvent(new Event('change')); },
     activate() { if (!builder.value) this.selectBuilder('workflow_builder'); if (!active) activate.click(); },
     isActive() { return active; },

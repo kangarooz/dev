@@ -63,9 +63,10 @@ export default class FixtureTarget extends Target {
 
   async open(page, episode) {
     await this.start();
+    this.episode = episode;
     // Always navigate, never dedupe: this is a brand-new page for a new episode, and
     // the cached screen name says nothing about what THIS page has loaded.
-    await this.#goto(page, openingScreen(episode), { force: true });
+    await this.#goto(page, withEpisode(openingScreen(episode), episode), { force: true });
     if (episode.workflowPath) {
       await page.evaluate((p) => window.fixture?.setPath?.(p), episode.workflowPath).catch(() => {});
     }
@@ -118,8 +119,7 @@ export default class FixtureTarget extends Target {
         return true;
       }
       if (has('scroll')) {
-        await page.mouse.wheel(0, 300);
-        return true;
+        return scrollViewport(page, 300);
       }
       return false;
     }
@@ -132,8 +132,7 @@ export default class FixtureTarget extends Target {
         if (hits) return true;
       }
       if (has('scroll')) {
-        await page.mouse.wheel(0, 320);
-        return true;
+        return scrollViewport(page, 320);
       }
       return false;
     }
@@ -145,8 +144,12 @@ export default class FixtureTarget extends Target {
       await this.#terminal(page, code);
       return true;
     }
-    if (screenIs(this.current, 'terminal.html') && code && !isShell(code)) {
-      await this.#goto(page, 'index.html');
+    // Episode 00 spends its back half in the app: starting the session, pasting the
+    // bootstrap, the stop instruction. None of those beats carry a code fence, so
+    // requiring one pinned the camera to a static shell prompt for 2:20 of a 4:14
+    // episode while the narration described a screen the viewer never saw.
+    if (screenIs(this.current, 'terminal.html') && (has('session', 'paste', 'bootstrap', 'agent', 'send', 'skills are visible') || (code && !isShell(code)))) {
+      await this.#goto(page, withEpisode('index.html', ctx.episode), { force: true });
     }
 
     if (has('dropdown', 'select `workflow_builder`', 'workflow_builder')) {
@@ -157,20 +160,31 @@ export default class FixtureTarget extends Target {
       await page.evaluate(() => window.fixture?.activate?.()).catch(() => {});
       return true;
     }
-    if (code && has('paste', 'type', 'send', 'prompt', 'follow up', 'follow-up')) {
-      await this.#compose(page, code);
-      return true;
+
+    // Pasting a prompt. The scripts say "Fresh session, bootstrap, then paste prompt 3"
+    // and carry NO code fence, so gating this on `code` meant the single most important
+    // action in every episode never happened. Fall back to the episode's real prompt
+    // text from the Socrates guide.
+    if (has('paste', 'type', 'send', 'prompt', 'follow up', 'follow-up')) {
+      const text = code || (await page.evaluate(() => window.fixture?.prompt?.() || '').catch(() => ''));
+      if (text) {
+        await this.#compose(page, text);
+        return true;
+      }
     }
-    if (has('send')) {
-      await page.evaluate(() => window.fixture?.send?.()).catch(() => {});
-      return true;
-    }
+
     if (has('scroll')) {
-      await page.evaluate(() => {
+      // Only claim the beat if the screen genuinely moved. Returning true on a no-op
+      // suppresses the compensating caption in record.mjs, leaving the viewer with a
+      // frozen frame and no words — strictly worse than an unhandled beat.
+      const moved = await page.evaluate(() => {
         const t = document.getElementById('transcript');
-        if (t) t.scrollTop = Math.min(t.scrollTop + 260, t.scrollHeight);
-      }).catch(() => {});
-      return true;
+        if (!t) return false;
+        const before = t.scrollTop;
+        t.scrollTop = Math.min(before + 260, t.scrollHeight);
+        return t.scrollTop !== before;
+      }).catch(() => false);
+      return moved;
     }
     return false;
   }
@@ -223,9 +237,32 @@ export default class FixtureTarget extends Target {
   }
 }
 
+/** The app screen serves per-episode prompts and answers, so it needs to know which. */
+function withEpisode(file, episode) {
+  if (!file.startsWith('index.html') || !episode?.id) return file;
+  return `index.html${file.includes('?') ? '&' : '?'}ep=${episode.id}`;
+}
+
 /** Compare a screen against a bare filename, ignoring any query string. */
 function screenIs(current, file) {
   return typeof current === 'string' && current.split('?')[0] === file;
+}
+
+/**
+ * Scroll the pane under the cursor, and report whether anything actually moved.
+ *
+ * `page.mouse.wheel` dispatches at the pointer's current position, which starts at
+ * (0,0) — over the 46px header, not the scroller. Without a move() first the wheel
+ * event lands on a non-scrolling element and every scroll beat silently does nothing.
+ */
+async function scrollViewport(page, delta) {
+  const size = page.viewportSize() || { width: 1280, height: 720 };
+  await page.mouse.move(Math.round(size.width / 2), Math.round(size.height / 2)).catch(() => {});
+  const before = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0).catch(() => 0);
+  await page.mouse.wheel(0, delta).catch(() => {});
+  await page.waitForTimeout(220);
+  const after = await page.evaluate(() => document.scrollingElement?.scrollTop ?? 0).catch(() => 0);
+  return after !== before;
 }
 
 /** Shell, or a prompt for the builder? The two belong on entirely different screens. */
@@ -237,11 +274,20 @@ function isShell(code) {
  * Which screen an episode opens on. Keyed on what the episode is about rather than its
  * number, so a renumbered or added script still lands somewhere sensible.
  */
+function workflowDataset(episode) {
+  const p = episode.workflowPath || '';
+  if (/jira/i.test(p)) return 'jira-assistant';
+  // Episode 09's subject is unified_search and attributions. Showing it the
+  // document-creation file while the header claims it is it_helpdesk_tier0_agent.json
+  // puts the narration and the picture in direct contradiction.
+  if (/helpdesk|unified/i.test(p)) return 'it-helpdesk';
+  return null;
+}
+
 function openingScreen(episode) {
   if (episode.workflowPath) {
-    // Episode 11 teaches how to read a COMPLEX workflow; showing it the compact
-    // teaching example would contradict every word of the narration.
-    return /jira/i.test(episode.workflowPath) ? 'workflow.html?w=jira-assistant' : 'workflow.html';
+    const dataset = workflowDataset(episode);
+    return dataset ? `workflow.html?w=${dataset}` : 'workflow.html';
   }
 
   const all = episode.segments.flatMap((s) => s.beats).map((b) => b.text || '').join(' ').toLowerCase();
@@ -249,6 +295,15 @@ function openingScreen(episode) {
 
   // Reading logs is a different screen from talking to the builder.
   if (/\blogs?\b/.test(title) || /debugger|execution log|failed run|step level/.test(all)) return 'logs.html';
+
+  // Episodes whose subject is the SHAPE of a workflow belong on the JSON, not on an
+  // empty chat window. 03 walks initial_state and persist_keys, 04 needs a step
+  // carrying depends_on and conditions together, 08 compares two native:chat roles —
+  // all three are visible in the document-creation file and in none of the chat UI.
+  if (/state management|making state|depends_on|conditions|native:chat/.test(`${title} ${all}`.slice(0, 4000))
+      && /initial_state|persist_keys|depends_on|conditions|native:chat/.test(all)) {
+    return 'workflow.html';
+  }
 
   const first = episode.segments[0]?.beats || [];
   const opensOnTerminal =

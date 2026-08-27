@@ -108,5 +108,23 @@ as dwell on the previous beat, so the video honours the script's intended pacing
 that run long are reported as `drift` in the manifest rather than compressed — that is a
 signal to trim the script, not the recording.
 
-**Narration audio.** There is none. The videos carry captions and a WebVTT track; a voice
-track is a separate pass. `episode.vtt` is the script for it, already timed.
+**Narration audio.** Off by default — the videos carry captions and a WebVTT track and are
+watched in silence. `--narrate` adds a voice track:
+
+```
+npm run record -- --target lol --all --mp4 --narrate
+```
+
+It picks an engine off PATH, preferring macOS `say` (good) over `espeak-ng` (robotic, but
+offline and available everywhere). Override with `TTS_BIN`. Anything neural needs model files
+from a CDN, so it will not work on a locked-down host.
+
+The part that matters is not the voice, it is the timing. With `--narrate`, each spoken beat's
+duration becomes the **measured** length of its audio instead of a word count at 150wpm. Those
+disagree by more than you would expect — one 33-word line measured 11.35s against a 13.2s
+estimate — and the error accumulates until captions drift away from the voice. Narration is
+therefore synthesized *before* the recording, and the recorder paces to the real numbers.
+
+`--narrate` is ignored with `--fast`, since there is nothing to sync to. Narrated output is
+written alongside the silent take as `episode-narrated.mp4`, so you can compare and keep
+whichever you prefer.

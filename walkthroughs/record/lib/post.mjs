@@ -243,6 +243,26 @@ export async function concat(mp4Paths, outPath) {
   return outPath;
 }
 
+/**
+ * Marry a narration track to a silent capture. The video is authoritative: `-shortest`
+ * trims audio that overruns rather than stretching the picture to meet it.
+ */
+export async function mux(videoPath, audioPath, outPath) {
+  const caps = ffmpegCapabilities();
+  if (!caps.canMp4) throw new Error(`${caps.bin} cannot mux to mp4 — see toMp4 for the fix`);
+  await run(caps.bin, [
+    '-y', '-hide_banner', '-loglevel', 'error',
+    '-i', videoPath,
+    '-i', audioPath,
+    '-map', '0:v:0', '-map', '1:a:0',
+    '-c:v', 'copy',
+    '-c:a', 'aac', '-b:a', '96k',
+    '-shortest', '-movflags', '+faststart',
+    outPath,
+  ]);
+  return outPath;
+}
+
 /** Probe a finished file so callers can assert on it instead of trusting the encoder. */
 export async function probe(path) {
   const ffmpeg = resolveFfmpeg();

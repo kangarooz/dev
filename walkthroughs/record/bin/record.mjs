@@ -17,7 +17,8 @@ import { createInterface } from 'node:readline/promises';
 import { loadEpisodes } from '../lib/parse.mjs';
 import { planEpisode } from '../lib/pace.mjs';
 import { recordEpisode } from '../lib/record.mjs';
-import { toMp4, concat } from '../lib/post.mjs';
+import { toMp4, concat, mux } from '../lib/post.mjs';
+import { buildTrack, narrationAvailable, resolveTts } from '../lib/narrate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PROJECT = join(HERE, '..');
@@ -41,6 +42,7 @@ const OPTIONS = {
   'base-url': { type: 'string' },
   'repo-dir': { type: 'string' },
   presenter: { type: 'string' },
+  narrate: { type: 'boolean', default: false },
   mp4: { type: 'boolean', default: false },
   'burn-captions': { type: 'boolean', default: false },
   concat: { type: 'boolean', default: false },
@@ -52,7 +54,7 @@ Socrates walkthrough recorder
 
   record   [--target fixture|lol|gitlab] [--episode 00,05 | --all] [--out DIR]
            [--fast] [--headed] [--base-url URL] [--repo-dir PATH]
-           [--mp4] [--burn-captions] [--concat] [--presenter NAME]
+           [--mp4] [--burn-captions] [--concat] [--presenter NAME] [--narrate]
   auth     --target lol|gitlab [--base-url URL]   save a login session for later runs
   list                                            show the episodes and their timings
   check    --target <t>                           preflight only: is the target reachable
@@ -164,6 +166,15 @@ async function cmdRecord(values) {
   }
 
   await mkdir(outDir, { recursive: true });
+  if (values.narrate) {
+    const engine = resolveTts();
+    if (!engine) {
+      console.error('\n--narrate: no speech engine found. Install espeak-ng, or use macOS `say`.\n');
+      return 2;
+    }
+    if (values.fast) console.log('  note: --fast skips narration (nothing to sync to)');
+    else console.log(`  narrating with ${engine.name}`);
+  }
   console.log(`\nRecording ${episodes.length} episode(s) against '${values.target}' into ${outDir}${values.fast ? ' [fast]' : ''}\n`);
 
   const results = [];
@@ -178,11 +189,19 @@ async function cmdRecord(values) {
         fast: values.fast,
         headed: values.headed,
         storageState: existsSync(storageState) ? storageState : null,
+        narrate: values.narrate,
       });
       let mp4 = null;
       if (values.mp4 && res.videoPath) {
         mp4 = res.videoPath.replace(/\.webm$/, '.mp4');
         await toMp4(res.videoPath, mp4, { vttPath: res.vttPath, burnCaptions: values['burn-captions'] });
+        if (res.narration?.clips?.length) {
+          const track = join(dirname(mp4), 'narration.wav');
+          await buildTrack(res.narration.clips, res.totalSec, track);
+          const withAudio = mp4.replace(/\.mp4$/, '-narrated.mp4');
+          await mux(mp4, track, withAudio);
+          mp4 = withAudio;
+        }
       }
       const took = (Date.now() - startedAt) / 1000;
       console.log(res.ok ? `ok (${fmt(took)})` : `PARTIAL (${fmt(took)}) — ${res.error}`);

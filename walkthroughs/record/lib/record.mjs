@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { planEpisode } from './pace.mjs';
 import { installOverlay, showCallout, showCaption, showChapter, clearOverlay } from './overlay.mjs';
 import { writeVtt } from './post.mjs';
+import { narratePlan } from './narrate.mjs';
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
 
@@ -29,6 +30,7 @@ export async function recordEpisode(episode, opts = {}) {
     storageState = null,
     viewport = DEFAULT_VIEWPORT,
     onBeat = null,
+    narrate = false,
   } = opts;
 
   if (!target) throw new Error('recordEpisode: no target supplied');
@@ -41,6 +43,15 @@ export async function recordEpisode(episode, opts = {}) {
   await mkdir(episodeDir, { recursive: true });
 
   const plan = planEpisode(episode, { fast });
+
+  // Narration must be synthesized BEFORE recording: it replaces each spoken beat's
+  // estimated duration with the measured length of its audio, and the recorder paces
+  // to those numbers. Doing it afterwards would leave picture and voice out of step.
+  let narration = { available: false, engine: null, clips: [] };
+  if (narrate && !fast) {
+    narration = await narratePlan(plan, join(episodeDir, '.audio'));
+  }
+
   const vttPath = join(episodeDir, 'episode.vtt');
   writeVtt(plan, vttPath);
 
@@ -114,6 +125,7 @@ export async function recordEpisode(episode, opts = {}) {
     plannedSec: plan.totalSec,
     actualSec: Math.round(elapsed * 100) / 100,
     drift: plan.drift,
+    narration: { requested: !!narrate, available: narration.available, engine: narration.engine, clips: narration.clips.length },
     videoPath,
     vttPath,
     recordedAt: new Date().toISOString(),
@@ -122,7 +134,11 @@ export async function recordEpisode(episode, opts = {}) {
   await writeFile(manifestPath, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
 
   if (failure && !videoPath) throw failure;
-  return { videoPath, vttPath, manifestPath, totalSec: plan.totalSec, ok: !failure, error: manifest.error };
+  return {
+    videoPath, vttPath, manifestPath, totalSec: plan.totalSec,
+    ok: !failure, error: manifest.error,
+    narration, plan,
+  };
 }
 
 /**

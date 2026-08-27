@@ -60,10 +60,26 @@ showing a weak response and steering out of it, which is more useful than a clea
 
 ## Recording the screen
 
-Nothing here renders video for you. Two viable paths:
+`record/` turns these scripts into videos — see [record/README.md](record/README.md).
 
-- **Manual capture** — screen recorder of choice, one take per episode, these scripts on a
-  second monitor. Fastest to first cut.
-- **Scripted capture** — Playwright drives the agent UI and records each segment natively
-  (`recordVideo`), so clips regenerate when the UI shifts. Higher setup cost, pays back at
-  the second or third re-record. This has to run on the VPN.
+```
+cd record && npm install
+npm run record -- --target fixture --all --mp4      # offline, works anywhere
+npm run record -- --target lol --all --mp4          # the real app; needs VPN + one-time auth
+```
+
+The scripts stay the source of truth: edit the markdown, re-run, get new videos. Narration
+becomes on-screen captions and a timed WebVTT track; `[CALLOUT]` beats become overlays and
+section headings become chapter cards, so a take needs no editing pass to be watchable.
+
+Two ways to record, and they produce the same video structurally:
+
+- **`--target lol`** — the live platform. This is what you publish. Has to run on a machine
+  with the VPN connected.
+- **`--target fixture`** — an offline reconstruction of the agent-builder UI (terminal, chat
+  screen, JSON viewer). Same beats, same pacing, same overlays; the pixels behind them are a
+  stand-in. Good for reviewing a script's pacing before booking time on the real app, and it
+  is the only mode that runs in CI or a cloud container.
+
+Manual capture still works if you prefer it — these scripts were written to be read off a
+second monitor, and nothing about the harness stops you.

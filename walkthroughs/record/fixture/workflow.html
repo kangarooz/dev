@@ -135,7 +135,8 @@
         { id: 'reply', type: 'native:send-message',
           depends_on: ['attributions'], inputs: { body: '$state.cited_answer' } }
       ]
-    }
+    },
+
     // Episode 09's subject is unified_search and attributions. It must be able to see
     // both on screen, or the narration is describing an absent file.
     'it-helpdesk': {
@@ -162,6 +163,28 @@
           outputs: ['cited_answer'] },
         { id: 'reply', type: 'native:send-message',
           depends_on: ['cite'], inputs: { body: '$state.cited_answer' } }
+      ]
+    }
+,
+
+    // Episode 12 reviews a first draft the viewer brought. It has to CONTAIN the flaw
+    // the narration calls out — draft_answer reads `passages` with nothing guaranteeing
+    // retrieval wrote it, and there is no path for "found nothing" — or the review is
+    // being narrated over a file that does not have the problem.
+    'faq-draft': {
+      name: 'faq-assistant-draft',
+      description: 'First draft: answer questions from the team handbook.',
+      initial_state: { collection: 'handbook' },
+      steps: [
+        { id: 'ask', type: 'native:input', outputs: ['user_query'] },
+        { id: 'search', type: 'native:semantic_search',
+          inputs: { query: '$state.user_query', collection: '$state.collection', top_k: 5 },
+          depends_on: ['ask'], outputs: ['passages'] },
+        { id: 'draft_answer', type: 'native:chat', model: 'gpt-5.4',
+          prompt: 'Answer $state.user_query using $state.passages.',
+          depends_on: ['search'], outputs: ['answer_text'] },
+        { id: 'reply', type: 'native:send-message',
+          depends_on: ['draft_answer'], inputs: { body: '$state.answer_text' } }
       ]
     }
   };

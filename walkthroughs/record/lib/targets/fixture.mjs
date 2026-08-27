@@ -70,6 +70,7 @@ export default class FixtureTarget extends Target {
     if (episode.workflowPath) {
       await page.evaluate((p) => window.fixture?.setPath?.(p), episode.workflowPath).catch(() => {});
     }
+    await this.#assertRendered(page);
   }
 
   /**
@@ -87,6 +88,32 @@ export default class FixtureTarget extends Target {
     // checks elsewhere compare against the bare filename via screenIs().
     await page.goto(`${this.origin}/${file}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
     this.current = file;
+  }
+
+  /**
+   * A fixture screen that loads but renders nothing is the failure this cannot ship
+   * with: the page still has a header, so the recorder's generic blank-page check
+   * passes and four minutes of empty JSON viewer get filmed as a success. A stray
+   * missing comma in the dataset literal did exactly that. Each screen therefore has
+   * to prove it drew its own content.
+   */
+  async #assertRendered(page) {
+    const screen = (this.current || '').split('?')[0];
+    const counts = {
+      'workflow.html': () => document.querySelectorAll('tr').length,
+      'logs.html': () => document.querySelectorAll('.step').length,
+      'terminal.html': () => document.querySelectorAll('.prompt').length,
+      'index.html': () => document.querySelectorAll('.sec').length,
+    };
+    if (!counts[screen]) return;
+    const n = await page.evaluate(counts[screen]).catch(() => 0);
+    if (!n) {
+      const errors = await page.evaluate(() => window.__fixtureError || null).catch(() => null);
+      throw new Error(
+        `fixture: ${screen} loaded but rendered no content${errors ? ` (${errors})` : ''} — ` +
+          'usually a syntax error in the page\'s inline script',
+      );
+    }
   }
 
   /**
@@ -300,6 +327,9 @@ function openingScreen(episode) {
   // empty chat window. 03 walks initial_state and persist_keys, 04 needs a step
   // carrying depends_on and conditions together, 08 compares two native:chat roles —
   // all three are visible in the document-creation file and in none of the chat UI.
+  // Reviewing your own draft: show a draft that actually has the flaw being reviewed.
+  if (/review|first draft/.test(title) && /draft/.test(all)) return 'workflow.html?w=faq-draft';
+
   if (/state management|making state|depends_on|conditions|native:chat/.test(`${title} ${all}`.slice(0, 4000))
       && /initial_state|persist_keys|depends_on|conditions|native:chat/.test(all)) {
     return 'workflow.html';

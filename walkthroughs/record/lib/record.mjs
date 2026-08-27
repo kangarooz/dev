@@ -73,6 +73,7 @@ export async function recordEpisode(episode, opts = {}) {
     page = await context.newPage();
 
     await target.open(page, episode);
+    await assertNotBlank(page, episode);
     await installOverlay(page);
     await showChapter(page, episode.title, `Episode ${episode.id}`, 2600);
     await page.waitForTimeout(fast ? 300 : 2600);
@@ -180,6 +181,33 @@ function findBundledChromium() {
     }
   }
   return null;
+}
+
+/**
+ * Refuse to film nothing.
+ *
+ * The failure worth guarding against is not a crash — it is a take that reports
+ * success having recorded a blank page for four minutes. That happened for real: a
+ * target cached the screen it was on, the next episode's navigation was skipped as
+ * redundant, and the recorder cheerfully filmed an empty document. Cheap to check
+ * once at the top of an episode, and it converts an invisible failure into a loud one.
+ */
+async function assertNotBlank(page, episode) {
+  const state = await page
+    .evaluate(() => ({
+      url: location.href,
+      text: (document.body?.innerText || '').trim().length,
+      nodes: document.body ? document.body.querySelectorAll('*').length : 0,
+    }))
+    .catch(() => null);
+
+  if (!state) throw new Error(`${episode.id}: page could not be inspected after target.open()`);
+  if (state.url === 'about:blank' || (state.text === 0 && state.nodes < 3)) {
+    throw new Error(
+      `${episode.id}: target.open() left an empty page (${state.url}, ${state.nodes} nodes) — ` +
+        'refusing to record a blank take',
+    );
+  }
 }
 
 async function runBeat(page, target, beat, ctx, ms, fast) {

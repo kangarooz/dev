@@ -63,14 +63,25 @@ export default class FixtureTarget extends Target {
 
   async open(page, episode) {
     await this.start();
-    await this.#goto(page, openingScreen(episode));
+    // Always navigate, never dedupe: this is a brand-new page for a new episode, and
+    // the cached screen name says nothing about what THIS page has loaded.
+    await this.#goto(page, openingScreen(episode), { force: true });
     if (episode.workflowPath) {
       await page.evaluate((p) => window.fixture?.setPath?.(p), episode.workflowPath).catch(() => {});
     }
   }
 
-  async #goto(page, file) {
-    if (this.current === file) return;
+  /**
+   * Navigate, skipping the load when we are already on that screen mid-episode.
+   *
+   * `force` exists because the dedupe is only safe WITHIN one episode. The target
+   * instance is reused across all 13, so a stale `this.current` from the previous
+   * episode would match the next episode's opening screen and skip the only
+   * navigation a fresh page ever gets — recording a blank white page while reporting
+   * success. close() clears it too; this is the belt to that braces.
+   */
+  async #goto(page, file, { force = false } = {}) {
+    if (!force && this.current === file) return;
     // this.current keeps the query string so a dataset switch re-navigates; screen
     // checks elsewhere compare against the bare filename via screenIs().
     await page.goto(`${this.origin}/${file}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
@@ -200,6 +211,10 @@ export default class FixtureTarget extends Target {
   }
 
   async close() {
+    // Cleared unconditionally: the recorder calls close() after every episode, and a
+    // screen name surviving into the next one is what makes #goto skip the navigation
+    // a fresh page needs.
+    this.current = null;
     if (this.server) {
       await new Promise((resolve) => this.server.close(resolve));
       this.server = null;

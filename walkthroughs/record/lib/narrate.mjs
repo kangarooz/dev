@@ -8,22 +8,41 @@
  * measured 11.35s against a 13.2s estimate, and errors like that accumulate across a
  * five-minute episode until the captions drift away from the voice.
  *
- * Engine quality varies enormously and the operator should choose deliberately:
- *   say        macOS built-in. Good. Use this one if you are on a Mac.
+ * Engine preference, best first:
+ *   kokoro     Neural, open weights, runs locally. What these videos are narrated with.
+ *   say        macOS built-in. Decent.
  *   espeak-ng  Formant synthesis. Robotic, but available everywhere and offline.
- * Anything neural needs model files from a CDN, which an offline or locked-down host
- * will not have.
+ *
+ * Kokoro needs two model files (~350MB total). Set KOKORO_MODEL / KOKORO_VOICES if they
+ * are not in /opt/kokoro, and KOKORO_VOICE / KOKORO_SPEED to change how it reads.
  */
 
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { resolveFfmpeg } from './post.mjs';
+
+const HERE = dirname(fileURLToPath(import.meta.url));
+const KOKORO_SCRIPT = join(HERE, 'tts', 'kokoro.py');
 
 let cachedEngine = null;
 
+function kokoroReady() {
+  const model = process.env.KOKORO_MODEL || '/opt/kokoro/kokoro-v1.0.onnx';
+  const voices = process.env.KOKORO_VOICES || '/opt/kokoro/voices-v1.0.bin';
+  if (!existsSync(model) || !existsSync(voices) || !existsSync(KOKORO_SCRIPT)) return null;
+
+  // The files existing proves nothing about the runtime; check the import too, so a
+  // half-finished setup falls back instead of failing mid-episode.
+  const python = process.env.PYTHON_BIN || 'python3';
+  const probe = spawnSync(python, ['-c', 'import kokoro_onnx, soundfile'], { encoding: 'utf8' });
+  if (probe.status !== 0) return null;
+  return { name: 'kokoro', bin: python, batch: true, script: KOKORO_SCRIPT };
+}
+
 /**
- * @returns {{name: string, bin: string}|null} null when nothing usable is installed.
+ * @returns {{name: string, bin: string, batch?: boolean}|null} null when nothing usable.
  */
 export function resolveTts() {
   if (cachedEngine !== null) return cachedEngine;
@@ -33,9 +52,14 @@ export function resolveTts() {
     return cachedEngine;
   }
 
+  const kokoro = kokoroReady();
+  if (kokoro) {
+    cachedEngine = kokoro;
+    return cachedEngine;
+  }
+
   const dirs = (process.env.PATH || '').split(':').filter(Boolean);
-  // 'say' first: on macOS it is markedly better than espeak, and the operator's own
-  // machine is where the publishable takes get recorded.
+  // 'say' before espeak: on macOS it is markedly better.
   for (const name of ['say', 'espeak-ng', 'espeak']) {
     for (const dir of dirs) {
       const candidate = join(dir, name);
@@ -80,6 +104,56 @@ async function synthesize(engine, text, outPath, wpm = 150) {
   await run(engine.bin, ['-v', 'en-us', '-s', String(wpm), '-w', outPath, text]);
 }
 
+/**
+ * One process for the whole episode. Returns path -> measured duration; a line the
+ * engine could not render is simply absent from the map.
+ */
+async function synthesizeBatch(engine, items) {
+  const out = new Map();
+  if (!items.length) return out;
+
+  const payload = JSON.stringify(items.map((i) => ({ text: i.beat.text, path: i.path })));
+  const result = await new Promise((resolve) => {
+    const child = spawn(engine.bin, [engine.script], { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => { stdout += String(c); });
+    child.stderr.on('data', (c) => {
+      stderr += String(c);
+      if (stderr.length > 4000) stderr = stderr.slice(-4000);
+    });
+    child.on('error', () => resolve(null));
+    child.on('close', () => resolve({ stdout, stderr }));
+    child.stdin.end(payload);
+  });
+
+  if (!result) return out;
+  let parsed;
+  try {
+    parsed = JSON.parse(result.stdout.trim().split('\n').pop() || '{}');
+  } catch {
+    return out;
+  }
+  if (parsed.error) return out;
+  for (const entry of parsed.ok || []) out.set(entry.path, entry.durSec);
+  return out;
+}
+
+/** One process per line. Fine for `say` and espeak, which start instantly. */
+async function synthesizeEach(engine, items, wpm) {
+  const out = new Map();
+  for (const item of items) {
+    try {
+      await synthesize(engine, item.beat.text, item.path, wpm);
+    } catch {
+      continue;
+    }
+    const measured = audioDuration(item.path);
+    if (measured) out.set(item.path, measured);
+  }
+  return out;
+}
+
 /** Measured length of an audio file, in seconds. */
 export function audioDuration(path) {
   const ffmpeg = resolveFfmpeg();
@@ -91,56 +165,71 @@ export function audioDuration(path) {
 }
 
 /**
- * Synthesize every spoken beat in a plan and rewrite the timeline around the real
- * audio lengths.
+ * Synthesize every spoken beat in an episode and record the measured lengths on it.
  *
- * Called BEFORE recording, because the durations it measures are what the recorder
- * paces to. Returns the clips so the caller can build a track once the video exists.
+ * Called BEFORE recording: planEpisode reads `narratedSec` on the next pass, so real
+ * audio durations flow back through the segment-timecode logic instead of bypassing
+ * it. Returns the clips; placeClips() gives them start times once the plan is redone.
  *
- * @param {{beats: Array}} plan Mutated in place: durSec and startSec are corrected.
+ * @param {object} episode Mutated: spoken beats gain narratedSec and narrationPath.
  * @param {string} dir Where to write the wavs.
- * @param {{wpm?: number, padSec?: number}} opts
+ * @param {{wpm?: number, padSec?: number}} [opts]
  */
-export async function narratePlan(plan, dir, opts = {}) {
+export async function narrateEpisode(episode, dir, opts = {}) {
   const engine = resolveTts();
   if (!engine) return { available: false, engine: null, clips: [] };
 
   const wpm = opts.wpm || 150;
-  // A beat of pure speech with no gap after it runs into the next line. This is the
+  // A line of speech with no gap after it runs straight into the next. This is the
   // breath between sentences.
   const pad = opts.padSec ?? 0.35;
 
   mkdirSync(dir, { recursive: true });
-  const clips = [];
 
-  for (let i = 0; i < plan.beats.length; i++) {
-    const beat = plan.beats[i];
-    if (beat.kind !== 'say' || !beat.text) continue;
-    const path = join(dir, `beat-${String(i).padStart(3, '0')}.wav`);
-    try {
-      await synthesize(engine, beat.text, path, wpm);
-    } catch {
-      // One failed line must not cost the whole episode its audio; that beat simply
-      // keeps its estimated duration and plays silent.
-      continue;
+  // Walk the episode's own beats, not a plan's copies, so the measured durations are
+  // written where planEpisode will read them on the next pass.
+  const spoken = [];
+  let n = 0;
+  for (const segment of episode.segments || []) {
+    for (const beat of segment.beats || []) {
+      const index = n++;
+      if (beat.kind !== 'say' || !beat.text) continue;
+      spoken.push({ index, beat, path: join(dir, `beat-${String(index).padStart(3, '0')}.wav`) });
     }
-    const measured = audioDuration(path);
-    if (!measured) continue;
-    beat.durSec = Math.round((measured + pad) * 100) / 100;
-    beat.narrationPath = path;
-    clips.push({ index: i, path, durSec: measured });
   }
 
-  // Durations changed, so every start time after the first spoken beat is now wrong.
-  let clock = 0;
-  for (const beat of plan.beats) {
-    beat.startSec = Math.round(clock * 100) / 100;
-    clock += beat.durSec;
+  // Batch engines load a large model once for the whole episode; per-line engines are
+  // cheap to spawn repeatedly. Both yield the same path -> measured duration map.
+  const measured = engine.batch
+    ? await synthesizeBatch(engine, spoken)
+    : await synthesizeEach(engine, spoken, wpm);
+
+  const clips = [];
+  for (const item of spoken) {
+    const durSec = measured.get(item.path);
+    if (!durSec) continue; // a line that failed keeps its estimate and plays silent
+    item.beat.narratedSec = Math.round((durSec + pad) * 100) / 100;
+    item.beat.narrationPath = item.path;
+    clips.push({ path: item.path, durSec });
   }
-  plan.totalSec = Math.round(clock * 100) / 100;
-  for (const clip of clips) clip.startSec = plan.beats[clip.index].startSec;
 
   return { available: true, engine: engine.name, clips };
+}
+
+/**
+ * Attach start times to clips from a re-planned timeline.
+ *
+ * Call after planEpisode has run again over the narrated durations: the plan is what
+ * knows where each beat actually lands once segment timecodes have been honoured.
+ */
+export function placeClips(plan, clips) {
+  const byPath = new Map(clips.map((c) => [c.path, c]));
+  const placed = [];
+  for (const beat of plan.beats) {
+    const clip = beat.narrationPath && byPath.get(beat.narrationPath);
+    if (clip) placed.push({ ...clip, startSec: beat.startSec });
+  }
+  return placed.sort((a, b) => a.startSec - b.startSec);
 }
 
 /**

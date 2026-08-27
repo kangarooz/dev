@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import { planEpisode } from './pace.mjs';
 import { installOverlay, showCallout, showCaption, showChapter, clearOverlay } from './overlay.mjs';
 import { writeVtt } from './post.mjs';
-import { narratePlan } from './narrate.mjs';
+import { narrateEpisode, placeClips } from './narrate.mjs';
 
 const DEFAULT_VIEWPORT = { width: 1280, height: 720 };
 
@@ -42,14 +42,22 @@ export async function recordEpisode(episode, opts = {}) {
   const episodeDir = join(outDir, `${episode.id}-${episode.slug}`);
   await mkdir(episodeDir, { recursive: true });
 
-  const plan = planEpisode(episode, { fast });
+  let plan = planEpisode(episode, { fast });
 
-  // Narration must be synthesized BEFORE recording: it replaces each spoken beat's
-  // estimated duration with the measured length of its audio, and the recorder paces
-  // to those numbers. Doing it afterwards would leave picture and voice out of step.
+  // Narration is synthesized BEFORE recording, because the measured length of each
+  // line is what the recorder paces to. Doing it afterwards would leave picture and
+  // voice out of step.
   let narration = { available: false, engine: null, clips: [] };
   if (narrate && !fast) {
-    narration = await narratePlan(plan, join(episodeDir, '.audio'));
+    narration = await narrateEpisode(episode, join(episodeDir, '.audio'));
+    if (narration.available) {
+      // Re-plan so the real durations pass back through the segment-timecode logic.
+      // Without this the timeline is just the clips end to end, and every pacing
+      // decision the script author made is quietly discarded — episode 12 collapsed
+      // from its scripted 4:00 to 2:47 that way.
+      plan = planEpisode(episode, { fast });
+      narration.clips = placeClips(plan, narration.clips);
+    }
   }
 
   const vttPath = join(episodeDir, 'episode.vtt');

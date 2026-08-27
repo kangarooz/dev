@@ -115,15 +115,39 @@ watched in silence. `--narrate` adds a voice track:
 npm run record -- --target lol --all --mp4 --narrate
 ```
 
-It picks an engine off PATH, preferring macOS `say` (good) over `espeak-ng` (robotic, but
-offline and available everywhere). Override with `TTS_BIN`. Anything neural needs model files
-from a CDN, so it will not work on a locked-down host.
+Engine preference, best first:
+
+| Engine | Quality | Setup |
+|---|---|---|
+| **kokoro** | Neural, natural. What these were narrated with. | `pip install kokoro-onnx soundfile` + two model files (~350MB) in `/opt/kokoro` |
+| `say` | Decent | macOS built-in |
+| `espeak-ng` | Robotic but universal | `apt install espeak-ng` |
+
+Kokoro model files come from the kokoro-onnx releases:
+
+```
+mkdir -p /opt/kokoro && cd /opt/kokoro
+curl -sSLO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.onnx
+curl -sSLO https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin
+```
+
+Point `KOKORO_MODEL` / `KOKORO_VOICES` elsewhere if you keep them somewhere else, and set
+`KOKORO_VOICE` (default `af_heart`) or `KOKORO_SPEED` to change how it reads. `TTS_BIN`
+overrides engine selection entirely.
+
+Kokoro synthesizes a whole episode in one process — the model takes a couple of seconds to
+load, so per-line spawning would waste about nine minutes across the series' 238 beats.
 
 The part that matters is not the voice, it is the timing. With `--narrate`, each spoken beat's
 duration becomes the **measured** length of its audio instead of a word count at 150wpm. Those
 disagree by more than you would expect — one 33-word line measured 11.35s against a 13.2s
 estimate — and the error accumulates until captions drift away from the voice. Narration is
 therefore synthesized *before* the recording, and the recorder paces to the real numbers.
+
+Those measured durations are then fed back through `planEpisode`, so the scripts' section
+timecodes still hold. Skipping that step is tempting and wrong: laying the clips end to end
+collapsed episode 12 from its scripted 4:00 to 2:47 and silently discarded every pacing
+decision in the script. Re-planned, it lands at 3:53.
 
 `--narrate` is ignored with `--fast`, since there is nothing to sync to. Narrated output is
 written alongside the silent take as `episode-narrated.mp4`, so you can compare and keep

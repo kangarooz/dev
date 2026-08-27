@@ -69,6 +69,13 @@ export function estimateSeconds(text, wpm = 150) {
  * where the parser's own narration estimate lands.
  */
 function beatDuration(beat) {
+  // A measured narration clip beats any estimate: when the line has actually been
+  // synthesized we know exactly how long it takes to say. Planning runs again after
+  // narration precisely so these land back inside the timecode logic rather than
+  // bypassing it — otherwise real audio durations would silently discard the pacing
+  // the script author chose.
+  const narrated = positiveNumber(beat?.narratedSec);
+  if (narrated !== null) return round2(narrated);
   const explicit = positiveNumber(beat?.estSec);
   if (explicit !== null) return round2(explicit);
   if (beat?.kind === 'say') return estimateSeconds(beat?.text);

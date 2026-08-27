@@ -17,7 +17,7 @@ import { createInterface } from 'node:readline/promises';
 import { loadEpisodes } from '../lib/parse.mjs';
 import { planEpisode } from '../lib/pace.mjs';
 import { recordEpisode } from '../lib/record.mjs';
-import { toMp4, concat, mux } from '../lib/post.mjs';
+import { toMp4, concat, mux, mediaDuration } from '../lib/post.mjs';
 import { buildTrack, narrationAvailable, resolveTts } from '../lib/narrate.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -197,7 +197,10 @@ async function cmdRecord(values) {
         await toMp4(res.videoPath, mp4, { vttPath: res.vttPath, burnCaptions: values['burn-captions'] });
         if (res.narration?.clips?.length) {
           const track = join(dirname(mp4), 'narration.wav');
-          await buildTrack(res.narration.clips, res.totalSec, track);
+          // Build the track to the CAPTURE's real length, not the plan's — the
+          // recording always runs longer, and a short track truncates the video.
+          const videoSec = mediaDuration(mp4) || res.totalSec;
+          await buildTrack(res.narration.clips, videoSec, track);
           const withAudio = mp4.replace(/\.mp4$/, '-narrated.mp4');
           await mux(mp4, track, withAudio);
           mp4 = withAudio;

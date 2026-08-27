@@ -244,23 +244,45 @@ export async function concat(mp4Paths, outPath) {
 }
 
 /**
- * Marry a narration track to a silent capture. The video is authoritative: `-shortest`
- * trims audio that overruns rather than stretching the picture to meet it.
+ * Marry a narration track to a silent capture.
+ *
+ * The video is authoritative and must never be trimmed, so the caller builds the track
+ * to the capture's real length (see mediaDuration). It matters: the track is laid out
+ * from the PLANNED timeline, but a real recording always runs longer — chapter cards,
+ * target actions and browser latency all add time — so audio built to the plan is
+ * reliably the shorter stream, and `-shortest` then cuts the end off the picture. On a
+ * 3:19.92 capture against a 3:06.26 track that silently discarded the closing 14s.
+ *
+ * `apad` is the obvious alternative and is a trap: it makes the audio stream infinite,
+ * and under `-filter_complex` with a copied video stream `-shortest` never terminates,
+ * so the encode runs forever.
  */
 export async function mux(videoPath, audioPath, outPath) {
   const caps = ffmpegCapabilities();
   if (!caps.canMp4) throw new Error(`${caps.bin} cannot mux to mp4 — see toMp4 for the fix`);
-  await run(caps.bin, [
+  const videoSec = mediaDuration(videoPath);
+  const args = [
     '-y', '-hide_banner', '-loglevel', 'error',
     '-i', videoPath,
     '-i', audioPath,
     '-map', '0:v:0', '-map', '1:a:0',
     '-c:v', 'copy',
     '-c:a', 'aac', '-b:a', '96k',
-    '-shortest', '-movflags', '+faststart',
-    outPath,
-  ]);
+  ];
+  // Hard stop at the video's own length: never longer, and never shorter either.
+  if (videoSec) args.push('-t', videoSec.toFixed(3));
+  args.push('-movflags', '+faststart', outPath);
+  await run(caps.bin, args);
   return outPath;
+}
+
+/** Duration of any media file in seconds, or null when it cannot be read. */
+export function mediaDuration(path) {
+  const caps = ffmpegCapabilities();
+  const r = spawnSync(caps.bin, ['-hide_banner', '-i', path], { encoding: 'utf8', maxBuffer: 8 * 1024 * 1024 });
+  const out = `${r.stdout || ''}${r.stderr || ''}`;
+  const m = /Duration:\s*(\d+):(\d\d):(\d\d(?:\.\d+)?)/.exec(out);
+  return m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : null;
 }
 
 /** Probe a finished file so callers can assert on it instead of trusting the encoder. */

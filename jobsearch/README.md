@@ -58,7 +58,18 @@ this repo). From any Claude Code session on this account:
 - Change cadence: `update_trigger {trigger_id, cron_expression}` (UTC)
 - Delete: `delete_trigger {trigger_id}`
 
-Default cadence: 12:00 & 20:00 UTC daily (8am & 4pm US Eastern in summer).
+Cadence (since Aug 31): weekdays 3x — cron `0 12,16,20 * * 1-5` UTC (8am/12pm/4pm
+ET in summer) on trigger `trig_01Q384AbNhfRGWgmRoioAj8s`; weekends 1x — cron
+`0 17 * * 0,6` UTC (1pm ET) on a second trigger (see list_triggers). BOTH triggers
+carry the same slim prompt: any prompt edit must be applied to both via
+update_trigger. Cron is UTC — at the November DST shift these become 7/11am/3pm
+and noon ET; do not chase it until then.
+
+The trigger prompt is a ~2KB stub; the full procedure lives in `runbook.md`
+(this repo). To change behavior: edit runbook.md and push — the scheduled run
+reads it fresh each firing. Only permission-scope changes require update_trigger.
+Write path is a delta journal: material changes append small JOBSEARCH-DELTA
+drafts; a weekly (Sunday) compaction folds them into the base state draft.
 
 Deployed trigger: `trig_01Q384AbNhfRGWgmRoioAj8s`, bound to the session that
 built this system (self-bind mode) because this org plan cannot attach the

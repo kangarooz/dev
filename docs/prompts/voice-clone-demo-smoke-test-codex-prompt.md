@@ -1,8 +1,11 @@
 # Voice-Cloned Demo Smoke Test — drop-in Codex prompt
 
 Paste everything below the line into a fresh Codex session on the machine that
-can reach the feature under test. Fill in the `<<...>>` placeholders first.
-First run takes 1–2 hours (installs + model download). Reruns take minutes.
+can reach the feature under test. Only three placeholders are required:
+APP_URL, REFERENCE_AUDIO, and HAPPY_PATH. Everything else has a default or
+is discovered by Codex. If Codex still asks for a value, answer with it in
+one line and it continues. First run takes 1–2 hours (installs + model
+download). Reruns take minutes.
 
 Pipeline: Chatterbox TTS (voice clone) + PyTorch/Torchaudio → Chrome DevTools
 Protocol drives the live feature → FFmpeg screen capture, edit, mix, encode →
@@ -12,22 +15,28 @@ Loom upload → smoke-test verdict + shareable link.
 
 You are running a full end-to-end demo smoke test of a new feature and
 producing a narrated walkthrough video in my cloned voice. Work autonomously.
-Do not stop to ask questions unless a placeholder below is missing or a
-credential is genuinely unavailable. Install what you need. Keep going until
-you hand me a Loom link and a PASS/FAIL verdict.
+Placeholder rule: any input below still written as <<...>> is unknown. Do
+NOT stop for it one at a time. First try to discover it yourself (probe
+localhost ports 3000, 5173, 8000, 8080, 80 for the app; look for *.wav or
+*.mp3 under ~/Desktop, ~/Downloads, ~/Music for a reference clip; read the
+app's visible UI to draft the happy path). Then ask me for everything you
+still cannot discover in ONE message, with your best guess for each, and
+proceed with the guesses if I don't answer within the session. Install
+what you need. Keep going until you hand me a Loom link and a PASS/FAIL
+verdict.
 
 ## Inputs (fill these in)
 
-- FEATURE_NAME: <<short name, e.g. "Image RAG for WPC">>
-- FEATURE_DESCRIPTION: <<2–4 sentences: what it does and what "working" looks like>>
-- APP_URL: <<http(s)://host:port of the running app>>
-- LOGIN: <<how to authenticate — env var names, a 1Password item, or "none">>
-- FIXTURES: <<absolute paths to any files to upload/drag in during the demo>>
-- HAPPY_PATH: <<numbered user steps, e.g. 1) open X 2) upload Y 3) ask Z 4) confirm citation appears>>
-- EXPECTED_RESULTS: <<what must be visible on screen for each step to count as passing>>
-- REFERENCE_AUDIO: <<absolute path to a 60–90 s clean WAV/MP3 of my voice, single speaker, no music>>
-- OUTPUT_DIR: <<absolute path, e.g. ~/demos/<feature-slug>>>
-- VIDEO_TITLE: <<title for the Loom>>
+- FEATURE_NAME: Chat with Manuals
+- FEATURE_DESCRIPTION: Upload a few PDF manuals into the local Legion platform, ask a question in plain English, and get an answer with citations that point back to the right page of the right manual. Working means the files show as uploaded, the answer appears, and at least one citation is visible and opens the source.
+- APP_URL: <<http(s)://host:port of the running app — discover on localhost first>>
+- LOGIN: none (if the app shows a login form, stop and ask me once for the env var names to use; never ask me for the password itself)
+- FIXTURES: <<absolute paths to 2–4 PDF manuals — search ~/Downloads and ~/Desktop for *.pdf first>>
+- HAPPY_PATH: 1) open APP_URL and confirm the Chat with Manuals screen 2) drag or select the FIXTURES PDFs and wait until each shows as uploaded 3) ask "What is the inspection interval for portable ladders?" 4) wait for the answer and confirm a citation appears 5) click the citation and confirm the source page opens
+- EXPECTED_RESULTS: step 1 header text visible; step 2 one chip/row per file with a done state; step 3 the question appears in the thread; step 4 an answer containing the word "inspect" plus at least one citation marker; step 5 the cited document/page is displayed
+- REFERENCE_AUDIO: <<absolute path to a 30–90 s clean WAV/MP3 of my voice, single speaker, no music>>
+- OUTPUT_DIR: ~/demos/chat-with-manuals
+- VIDEO_TITLE: Local AI Document Q&A — Chat with Manuals
 - MAX_LENGTH_SECONDS: 90
 
 ## Phase 0 — Environment (skip anything already present)

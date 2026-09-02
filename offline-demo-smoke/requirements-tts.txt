@@ -1,0 +1,10 @@
+# Voice cloning backends (Chatterbox). Install AFTER requirements.txt, online:
+#   pip install -r requirements-tts.txt
+# torch/torchaudio wheels: pick the index for your accelerator first, e.g.
+#   CUDA 12.x : pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
+#   ROCm      : pip install torch torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
+#   CPU/macOS : pip install torch torchaudio
+# then run `python -m demo_smoke prefetch --tts turbo` once while online to fill the HF cache.
+torch>=2.2
+torchaudio>=2.2
+chatterbox-tts>=0.1

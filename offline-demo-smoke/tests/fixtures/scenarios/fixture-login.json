@@ -1,0 +1,37 @@
+{
+  "name": "Chat with Manuals (fixture, login form)",
+  "slug": "fixture-login",
+  "app_url": "http://127.0.0.1:8765",
+  "viewport": {"width": 1280, "height": 720},
+  "login": {
+    "type": "form",
+    "url": "/login.html",
+    "username_selector": "#username",
+    "password_selector": "#password",
+    "submit_selector": "#login-btn",
+    "username_env": "DEMO_SMOKE_USER",
+    "password_env": "DEMO_SMOKE_PASS",
+    "success_selector": "#file-input"
+  },
+  "max_length_seconds": 60,
+  "intro": "This run signs in first, then opens the authenticated app.",
+  "outro": "Signed in and ready to chat with the manuals.",
+  "steps": [
+    {
+      "id": "open",
+      "title": "Open the authenticated app",
+      "narration": "After signing in, the app opens without bouncing back to the login page.",
+      "actions": [{"goto": "/?auth=1"}],
+      "expect": [{"text": "Chat with Manuals"}, {"url_contains": "auth=1"}, {"not_text": "Sign in"}],
+      "timeout_s": 30
+    },
+    {
+      "id": "upload",
+      "title": "Upload a manual",
+      "narration": "Upload one manual.",
+      "actions": [{"upload": {"selector": "input[type=file]", "files": ["../files/manual-a.pdf"]}}],
+      "expect": [{"selector": ".doc-chip", "count_min": 1}],
+      "timeout_s": 30
+    }
+  ]
+}

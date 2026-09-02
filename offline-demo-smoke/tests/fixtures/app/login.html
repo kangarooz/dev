@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in - Chat with Manuals</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>Sign in</h1>
+  <span class="tag">offline demo fixture</span>
+</header>
+<main>
+  <section class="panel login">
+    <form id="login-form">
+      <label for="username">Username</label>
+      <input id="username" name="username" type="text" autocomplete="username">
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password">
+      <div class="row">
+        <button type="submit" id="login-btn">Sign in</button>
+        <span id="login-error" class="error" aria-live="polite"></span>
+      </div>
+    </form>
+  </section>
+</main>
+<script>
+  (function () {
+    var form = document.getElementById("login-form");
+    var err = document.getElementById("login-error");
+    form.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var u = document.getElementById("username").value;
+      var p = document.getElementById("password").value;
+      if (u === "demo" && p === "secret") {
+        try { window.localStorage.setItem("cwm_auth", "1"); } catch (e) { /* ignore */ }
+        var params = new URLSearchParams(window.location.search);
+        var next = params.get("next");
+        if (!next || next.indexOf("/") !== 0) { next = "index.html"; }
+        window.location.href = next;
+      } else {
+        err.textContent = "Invalid username or password";
+        console.error("login rejected for user " + JSON.stringify(u));
+      }
+    });
+  })();
+</script>
+</body>
+</html>

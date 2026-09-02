@@ -1,6 +1,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -282,3 +283,75 @@ def test_detect_with_fake_llm(fake_llm):
     assert rep["llm"]["tool_call"]["pass"] is True
     assert rep["torch_device"] == env.torch_device()
     assert isinstance(rep["chatterbox"], bool)
+
+
+# --------------------------------------------------------------------------- Smart App Control
+
+
+class _FakeWinreg:
+    """Just enough of ``winreg`` for ``smart_app_control``: one key, one value (or none)."""
+
+    HKEY_LOCAL_MACHINE = object()
+
+    def __init__(self, value=None, key_exists=True):
+        self.value = value
+        self.key_exists = key_exists
+        self.opened: list[str] = []
+
+    def OpenKey(self, root, path):  # winreg's real (CamelCase) name
+        assert root is self.HKEY_LOCAL_MACHINE
+        self.opened.append(path)
+        if not self.key_exists:
+            raise FileNotFoundError(2, "key not found")
+
+        class _Key:
+            def __enter__(self_inner):
+                return self_inner
+
+            def __exit__(self_inner, *exc):
+                return False
+
+        return _Key()
+
+    def QueryValueEx(self, key, name):  # winreg's real (CamelCase) name
+        assert name == env.SAC_VALUE
+        if self.value is None:
+            raise FileNotFoundError(2, "value not found")
+        return self.value, 4   # REG_DWORD
+
+
+@pytest.mark.parametrize("value, expected", [(1, "on"), (2, "evaluation"), (0, "off"), (7, "unknown"),
+                                             ("garbage", "unknown"), (None, "unknown")])
+def test_smart_app_control_states(value, expected):
+    fake = _FakeWinreg(value)
+    assert env.smart_app_control(fake) == expected
+    assert fake.opened == [env.SAC_KEY]
+    assert env.SAC_KEY == r"SYSTEM\CurrentControlSet\Control\CI\Policy"
+    assert env.SAC_VALUE == "VerifiedAndReputablePolicyState"
+
+
+def test_smart_app_control_missing_key_and_non_windows(monkeypatch):
+    assert env.smart_app_control(_FakeWinreg(key_exists=False)) == "unknown"
+    monkeypatch.setattr(env, "_is_windows", lambda: False)
+    assert env.smart_app_control() is None        # not applicable: no registry read at all
+
+
+def test_detect_reports_smart_app_control_only_on_windows(monkeypatch, tmp_path):
+    monkeypatch.setenv("DEMO_SMOKE_CHROME", str(tmp_path / "nochrome"))
+    monkeypatch.setattr(env, "_is_windows", lambda: False)
+    rep = env.detect()
+    assert rep["smart_app_control"] is None
+    assert not any("Smart App Control" in h for h in rep["hints"])
+
+    monkeypatch.setattr(env, "_is_windows", lambda: True)
+    monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(1))
+    rep = env.detect()
+    assert rep["smart_app_control"] == "on"
+    assert env.SAC_HINT in rep["hints"]
+    assert "Windows Security > App & browser control" in env.SAC_HINT and "WSL2" in env.SAC_HINT
+    json.dumps(rep)
+
+    monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(0))
+    rep = env.detect()
+    assert rep["smart_app_control"] == "off"
+    assert not any("Smart App Control" in h for h in rep["hints"])

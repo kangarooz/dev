@@ -193,6 +193,18 @@ def build_request(scenario: dict) -> str:
 
 def from_llm(scenario: dict, base_url: str, model: str, timeout: int = 180) -> tuple[dict, str, str]:
     """(narration, source, note): source is "llm" or "template" (with the reason in note)."""
+    d = from_llm_detail(scenario, base_url, model, timeout=timeout)
+    return d["narration"], d["source"], d["note"]
+
+
+def from_llm_detail(scenario: dict, base_url: str, model: str, timeout: int = 180) -> dict:
+    """Like :func:`from_llm` but structured, so callers can log the numbers instead of parsing the note::
+
+        {"narration", "source": "llm"|"template", "note",
+         "attempts": int,            # requests answered by the model (0 when the first request failed)
+         "problems": [str],          # one entry per rejected answer (validation/JSON problems)
+         "fallback": bool, "fallback_reason": "request failed: ..." | "rejected twice" | None}
+    """
     from . import llm
 
     messages = [
@@ -200,13 +212,18 @@ def from_llm(scenario: dict, base_url: str, model: str, timeout: int = 180) -> t
         {"role": "user", "content": build_request(scenario)},
     ]
     attempts: list[str] = []
+    problems_seen: list[str] = []
+    n_attempts = 0
+    fallback_reason: str | None = None
     for attempt in range(2):
         try:
             resp = llm.chat(base_url, model, messages, timeout=timeout,
                             temperature=0.1, response_json=True)
         except llm.LLMError as e:
             attempts.append(f"request failed: {e}")
+            fallback_reason = f"request failed: {e}"
             break
+        n_attempts += 1
         text = llm.content_text(resp)
         try:
             narr = extract_json(text)
@@ -216,8 +233,10 @@ def from_llm(scenario: dict, base_url: str, model: str, timeout: int = 180) -> t
             problems = validate(narr, scenario)
             if not problems:
                 note = "narration from model" if attempt == 0 else "narration from model after one repair round"
-                return narr, "llm", note
-        attempts.append(f"attempt {attempt + 1}: " + "; ".join(problems))
+                return {"narration": narr, "source": "llm", "note": note, "attempts": n_attempts,
+                        "problems": problems_seen, "fallback": False, "fallback_reason": None}
+        problems_seen.append(f"attempt {attempt + 1}: " + "; ".join(problems))
+        attempts.append(problems_seen[-1])
         if attempt == 0:
             messages.append({"role": "assistant", "content": text or ""})
             messages.append({
@@ -227,4 +246,5 @@ def from_llm(scenario: dict, base_url: str, model: str, timeout: int = 180) -> t
                            + "\nReturn the corrected JSON object only, same schema, nothing else.",
             })
     note = "fell back to template narration: " + " | ".join(attempts)
-    return template(scenario), "template", note
+    return {"narration": template(scenario), "source": "template", "note": note, "attempts": n_attempts,
+            "problems": problems_seen, "fallback": True, "fallback_reason": fallback_reason or "rejected twice"}

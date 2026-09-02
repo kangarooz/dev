@@ -292,6 +292,49 @@ def hf_weights_present(cache: str | None = None) -> dict:
     return found
 
 
+# --------------------------------------------------------------------------- windows
+
+# HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState
+# (Windows 11 Smart App Control): 0 off, 1 on, 2 evaluation; the value is missing on
+# builds without Smart App Control (Windows 10, LTSC).
+SAC_KEY = r"SYSTEM\CurrentControlSet\Control\CI\Policy"
+SAC_VALUE = "VerifiedAndReputablePolicyState"
+SAC_STATES = {0: "off", 1: "on", 2: "evaluation"}
+SAC_HINT = ("Smart App Control is ON and will block unsigned Python extension modules (torch, pandas, "
+            "librosa). Turn it off: Windows Security > App & browser control > Smart App Control settings "
+            "> Off (one-way), or run the kit in WSL2.")
+
+
+def _is_windows() -> bool:
+    return sys.platform == "win32"
+
+
+def smart_app_control(winreg=None) -> str | None:
+    """Windows Smart App Control state: ``"on" | "evaluation" | "off" | "unknown"``; ``None`` off Windows.
+
+    Reads the registry value above with ``winreg`` (a fake module can be passed in for tests).
+    ``"unknown"`` covers a missing key/value (a Windows build without SAC) and any read error;
+    only ``"on"`` blocks unsigned ``.pyd`` files, so that is the only state doctor complains about.
+    Never raises.
+    """
+    if winreg is None:
+        if not _is_windows():
+            return None
+        try:
+            import winreg  # type: ignore[import-not-found]
+        except ImportError:
+            return "unknown"
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, SAC_KEY) as key:
+            value, _kind = winreg.QueryValueEx(key, SAC_VALUE)
+    except OSError:
+        return "unknown"
+    try:
+        return SAC_STATES.get(int(value), "unknown")
+    except (TypeError, ValueError):
+        return "unknown"
+
+
 # --------------------------------------------------------------------------- doctor
 
 
@@ -332,8 +375,13 @@ def detect(base_url: str | None = None, model: str | None = None,
         },
         "llm": None,
         "opencode": shutil.which("opencode"),
+        "smart_app_control": None,
         "hints": hints,
     }
+    if _is_windows():
+        rep["smart_app_control"] = smart_app_control()
+        if rep["smart_app_control"] == "on":
+            hints.append(SAC_HINT)
     try:
         rep["ffmpeg"] = find_ffmpeg()
         rep["ffmpeg_version"] = ffmpeg_version(rep["ffmpeg"])

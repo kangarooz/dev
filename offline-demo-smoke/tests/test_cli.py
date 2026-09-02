@@ -125,6 +125,43 @@ def test_doctor_with_missing_tools_and_llm(out_dir, capsys, monkeypatch, tmp_pat
     assert "llm unreachable" in rep["error"] and rep["hints"]
 
 
+def test_doctor_flags_smart_app_control(out_dir, capsys, monkeypatch, fake_chrome):
+    """Windows + Smart App Control ON -> PROBLEMS (exit 3) with the how-to-turn-it-off hint;
+    off/evaluation is reported but not a problem; the key is absent off Windows."""
+    from demo_smoke import env
+
+    monkeypatch.setattr(env, "_is_windows", lambda: True)
+    monkeypatch.setattr(env, "smart_app_control", lambda winreg=None: "on")
+    assert run("doctor", "--out", out_dir) == 3
+    out = capsys.readouterr().out
+    assert out.startswith("doctor: PROBLEMS") and "smart_app_control=ON" in out
+    assert f"hint: {env.SAC_HINT}" in out
+    rep = json.loads((out_dir / "logs" / "doctor.json").read_text())
+    assert rep["smart_app_control"] == "on" and "smart_app_control ON" in rep["error"] and rep["exit_code"] == 3
+
+    monkeypatch.setattr(env, "smart_app_control", lambda winreg=None: "evaluation")
+    assert run("doctor", "--out", out_dir) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("doctor: ok") and "smart_app_control=evaluation" in out and "Smart App Control" not in out
+
+    monkeypatch.setattr(env, "_is_windows", lambda: False)
+    assert run("doctor", "--out", out_dir) == 0
+    assert "smart_app_control" not in capsys.readouterr().out
+    assert json.loads((out_dir / "logs" / "doctor.json").read_text())["smart_app_control"] is None
+
+
+def test_bench_commands_are_registered(capsys):
+    """The bench pass registers bench / bench-meta / opencode-events on the main parser."""
+    assert run("--help") == 0
+    out = capsys.readouterr().out
+    for cmd in ("bench", "bench-meta", "opencode-events"):
+        assert cmd in out
+    assert run("bench") == 4                       # SCENARIO and --out are required
+    assert run("bench", "s.json", "--out", "x", "--driver", "nope") == 4
+    assert "error:" in capsys.readouterr().err
+    assert run("opencode-events", "does-not-exist.jsonl") == 4
+
+
 def test_check_model(out_dir, fake_llm, capsys, unreachable_url):
     fake_llm.queue.append({"tool_calls": [{"name": "get_step_status", "arguments": {"step_id": "open"}}]})
     assert run("check-model", "--base-url", fake_llm.base_url, "--model", "m", "--out", out_dir) == 0
@@ -216,6 +253,8 @@ def test_narrate_llm(out_dir, simple_scenario_path, fake_llm, capsys):
     assert "source=template" in capsys.readouterr().out
     log = json.loads((out_dir / "logs" / "narrate-llm.json").read_text())
     assert log["source"] == "template" and "fell back" in log["note"]
+    assert log["attempts"] == 2 and len(log["problems"]) == 2 and log["fallback"] is True
+    assert log["fallback_reason"] == "rejected twice"
 
 
 def test_missing_prerequisites_are_exit_3(out_dir, simple_scenario_path, capsys, monkeypatch):
@@ -440,6 +479,8 @@ def test_run_with_llm_narration(out_dir, simple_scenario_path, monkeypatch, fake
     assert "[narrate] source=llm" in out
     res = json.loads((out_dir / "result.json").read_text())
     assert res["narration_source"] == "llm" and res["env"]["llm"]["tool_call"]["pass"] is True
+    run_log = json.loads((out_dir / "logs" / "run.json").read_text())
+    assert run_log["llm"] == {"attempts": 1, "problems": [], "fallback": False, "fallback_reason": None}
     # missing flags are bad input, reported before doctor/dryrun run (exit 4, not 3)
     calls = install_fakes(monkeypatch)
     assert run("run", simple_scenario_path, "--out", out_dir, *TONE, "--headless", "--narration", "llm") == 4

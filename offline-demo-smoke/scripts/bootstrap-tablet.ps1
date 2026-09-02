@@ -50,6 +50,16 @@ if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
 # policy can override the CurrentUser scope, which throws; that is harmless here.
 try { Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction Stop }
 catch { Warn 'could not set CurrentUser execution policy (overridden by a wider scope); continuing under Bypass' }
+# Smart App Control (Windows 11) blocks unsigned/unknown binaries with no allowlist, so the
+# unsigned Python extension modules the kit installs (torch, pandas, librosa .pyd files) fail to
+# import. Read-only check of the same registry value `python -m demo_smoke doctor` reports
+# (1 = on, 2 = evaluation, 0 = off, missing = not applicable): warn and continue, never change it.
+$sacState = (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy' `
+              -Name VerifiedAndReputablePolicyState -ErrorAction SilentlyContinue).VerifiedAndReputablePolicyState
+if ($sacState -eq 1) {
+  Warn 'Smart App Control is ON and will block unsigned Python extension modules (torch, pandas, librosa). Turn it off: Windows Security > App & browser control > Smart App Control settings > Off (one-way), or run the kit in WSL2.'
+  Warn 'Continuing anyway: the venv and deps install, but --tts turbo/nano will fail to import torch until it is off.'
+}
 Say "machine: $env:COMPUTERNAME  user: $env:USERNAME  PowerShell $($PSVersionTable.PSVersion)"
 
 # ---------------------------------------------------------------- winget installs

@@ -30,3 +30,9 @@ tests/**/tmp/
 voices/*.wav
 voices/*.json
 !voices/.gitkeep
+
+# bench runs (python -m demo_smoke bench --out bench/...): runs/, meta/, report.md, bench.json.
+# The example baseline (and a hand-written bench/baseline.json) stay tracked.
+bench/*
+!bench/baseline.example.json
+!bench/baseline.json

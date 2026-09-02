@@ -116,7 +116,9 @@ def test_sample_summary_and_stage_times(sample):
     assert s["failed_tool_calls"] == [] and s["errors"] == []
     assert s["assistant_messages"] == 1 and s["permission_prompts"] == 0 and s["denied"] == 0
     assert s["steps"] == 9 and s["step_limit_reached"] is False
-    assert s["tokens_in"] == 900 and s["tokens_out"] == 180 and s["tokens_total"] == 1080 and s["cost"] == 0
+    # the fixture's step_finish cost is 0 with tokens counted: OpenCode had no price for the model -> unknown
+    assert s["tokens_in"] == 900 and s["tokens_out"] == 180 and s["tokens_total"] == 1080 and s["cost"] is None
+    assert s["chained_kit_calls"] == 0
     assert s["wall_s"] and s["wall_s"] > 10
     stages = s["stages"]
     assert list(stages) == list(oe.STAGES)
@@ -307,6 +309,15 @@ def test_stage_seconds_sums_repeats_and_narrate_variants():
     assert [c["kit_command"] for c in calls][-3:] == ["check-model", None, "verify"]
     assert oe.kit_command_of(None) is None and oe.kit_command_of("echo -m demo_smoke") is None
     assert oe.kit_command_of("'/p y/python' -m demo_smoke record 'a b.json'") == "record"
+    # one bash call chaining several kit commands: every command counted, its seconds split evenly
+    chained = "python -m demo_smoke doctor --out o && python -m demo_smoke dryrun s --out o"
+    assert oe.kit_commands_of(chained) == ["doctor", "dryrun"] and oe.kit_command_of(chained) == "doctor"
+    parsed = oe.parse([_tool(chained, start=0, end=5000)])
+    assert parsed["tool_calls"][0]["kit_commands"] == ["doctor", "dryrun"]
+    assert oe.stage_seconds(parsed["tool_calls"]) == {"doctor": 2.5, "dryrun": 2.5, "narrate": None, "synth": None,
+                                                     "record": None, "edit": None, "verify": None}
+    chained_summary = oe.summary(parsed)
+    assert chained_summary["kit_commands"] == ["doctor", "dryrun"] and chained_summary["chained_kit_calls"] == 1
     s = oe.summary({"tool_calls": calls})
     assert s["used_narrate_llm"] and s["used_narrate_template"]
 
@@ -321,6 +332,32 @@ def test_wrote_narration_detection():
     assert oe.wrote_narration(calls(_tool("printf '{}' > demo-output/audio/narration.json"))) is True
     assert oe.wrote_narration(calls(_tool("echo x", tool="edit", filePath="C:\\out\\audio\\narration.json"))) is True
     assert oe.wrote_narration(calls(_tool("echo x", tool="edit", filePath="C:\\out\\logs\\doctor.json"))) is False
+    # a write the permission rules rejected (or a failed shell redirect) left no file behind
+    denied = _tool("", tool="write", status="error", exit_code=None, error="rejected permission",
+                   filePath="/tmp/bench/runs/x/r1/audio/narration.json")
+    assert oe.wrote_narration(calls(denied)) is False
+    assert oe.wrote_narration(calls(_tool("", tool="write", status="error", exit_code=None, error="ENOENT",
+                                          filePath="o/audio/narration.json"))) is False
+    assert oe.wrote_narration(calls(_tool("printf '{}' > o/audio/narration.json", exit_code=1))) is False
+    assert oe.wrote_narration(calls(_tool("printf '{}' > o/audio/narration.json", exit_code=None))) is True
+    ok_then_denied = calls(_tool("", tool="write", filePath="o/audio/narration.json", exit_code=None), denied)
+    assert oe.wrote_narration(ok_then_denied) is True
+    s = oe.summary(oe.parse([denied]))
+    assert s["narration_written_by_agent"] is False and s["denied"] == 1
+
+
+def test_parse_survives_nan_and_infinite_timestamps():
+    lines = ['{"type": "step_start", "timestamp": NaN, "sessionID": "s"}',
+             '{"type": "step_finish", "timestamp": Infinity, "part": {"reason": "stop", "tokens": {"total": NaN}}}',
+             ('{"type": "tool_use", "timestamp": -Infinity, "part": {"tool": "bash", "state": {"status": "completed", '
+              '"input": {"command": "ls"}, "time": {"start": NaN, "end": 5}}}}'),
+             _ev("text", text="done")]
+    r = oe.parse(lines)
+    assert r["first_timestamp"] == r["last_timestamp"] == 1700000000000
+    assert r["tool_calls"][0]["started"] is None and r["tool_calls"][0]["seconds"] is None
+    assert r["session_id"] == "s" and r["malformed_events"] == 0
+    assert oe._int_or_none(float("nan")) is None and oe._int_or_none("inf") is None and oe._int_or_none("7.9") == 7
+    json.dumps(oe.summary(r))
 
 
 # ----------------------------------------------------------------------------- CLI registration

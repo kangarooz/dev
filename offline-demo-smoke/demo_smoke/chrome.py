@@ -433,12 +433,24 @@ class ChromeSession:
         self._kill_detached_browser()
         # the profile holds the logged-in app session (cookies, localStorage tokens) under the
         # agent-readable output tree: remove it with the process (chrome.log stays in logs/)
-        shutil.rmtree(self.profile_dir, ignore_errors=True)
+        self._remove_profile()
         try:
             if self._log_file is not None:
                 self._log_file.close()
         except Exception:
             log.debug("ignored error", exc_info=True)
+
+    def _remove_profile(self) -> None:
+        """Delete the profile directory, retrying briefly: Chrome's renderer/GPU children
+        can still be releasing files for a moment after the browser process is gone."""
+        deadline = time.monotonic() + TERMINATE_GRACE_S
+        while True:
+            shutil.rmtree(self.profile_dir, ignore_errors=True)
+            if not self.profile_dir.exists() or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+        if self.profile_dir.exists():
+            log.warning("could not fully remove the Chrome profile %s", self.profile_dir)
 
     def _detach_cdp(self) -> None:
         if self.cdp is not None:

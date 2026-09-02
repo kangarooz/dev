@@ -128,3 +128,32 @@ def test_from_llm_request_failure(fake_llm, scen, unreachable_url):
     narr, source, note = narration.from_llm(scen, fake_llm.base_url, "m")
     assert source == "template" and "HTTP 500" in note
     assert narration.validate(narr, scen) == []
+
+
+def test_from_llm_detail_counts_attempts_and_problems(fake_llm, scen):
+    """The structured result `run`/`narrate-llm` log: attempts answered, one problem per rejected
+    answer, and why it fell back - so nobody has to grep the word "attempt" out of the note."""
+    fake_llm.queue.append({"content": json.dumps(_llm_narr(scen))})
+    d = narration.from_llm_detail(scen, fake_llm.base_url, "m")
+    assert d["source"] == "llm" and d["attempts"] == 1 and d["problems"] == [] and d["fallback"] is False
+    assert d["fallback_reason"] is None and d["narration"]["intro"] == "Intro from the model."
+
+    broken = _llm_narr(scen)
+    broken["steps"][1]["id"] = "wrong-id"
+    fake_llm.queue.append({"content": json.dumps(broken)})
+    fake_llm.queue.append({"content": json.dumps(_llm_narr(scen))})
+    d = narration.from_llm_detail(scen, fake_llm.base_url, "m")
+    assert d["source"] == "llm" and d["attempts"] == 2 and len(d["problems"]) == 1 and "repair" in d["note"]
+    assert d["problems"][0].startswith("attempt 1: ")
+
+    fake_llm.queue.append({"content": "I would rather not."})
+    fake_llm.queue.append({"content": json.dumps({"intro": "x"})})
+    d = narration.from_llm_detail(scen, fake_llm.base_url, "m")
+    assert d["source"] == "template" and d["attempts"] == 2 and len(d["problems"]) == 2
+    assert d["fallback"] is True and d["fallback_reason"] == "rejected twice"
+    assert d["problems"][1].startswith("attempt 2: ")
+
+    fake_llm.queue.append({"status": 500})
+    d = narration.from_llm_detail(scen, fake_llm.base_url, "m")
+    assert d["source"] == "template" and d["attempts"] == 0 and d["problems"] == []
+    assert d["fallback"] is True and d["fallback_reason"].startswith("request failed:") and "HTTP 500" in d["fallback_reason"]

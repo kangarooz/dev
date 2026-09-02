@@ -600,6 +600,18 @@ company's video host; the file needs no re-encoding.
   usual workaround; otherwise `--tts nano` on CPU.
 - **Apple Silicon**: default PyPI torch gives MPS; `auto` picks `turbo`. If MPS
   falls over on an op, `PYTORCH_ENABLE_MPS_FALLBACK=1`.
+- **Windows Security toast "Smart App Control has blocked part of this app"** (naming a
+  `.pyd` such as `timezones.cp311-win_amd64.pyd`, `torch\lib\...dll` or a librosa/numba
+  module) during setup or the first `--tts turbo`/`nano` run: Windows 11's Smart App
+  Control blocks unsigned/unknown binaries and has no allowlist, so the Python extension
+  modules torch, pandas and librosa ship cannot load. `python -m demo_smoke doctor` prints
+  `smart_app_control=ON` and a `PROBLEMS` hint (it reads
+  `HKLM\SYSTEM\CurrentControlSet\Control\CI\Policy\VerifiedAndReputablePolicyState`,
+  1 = on, 2 = evaluation, 0 = off; `scripts\bootstrap-tablet.ps1` warns the same way and
+  continues). Fix: Windows Security > App & browser control > Smart App Control settings >
+  **Off** (one-way: it cannot be turned back on without reinstalling Windows), then re-run
+  `scripts\setup.ps1`; or run the kit inside WSL2 instead. `--tts tone` and the browser
+  pipeline work either way (no native extensions involved).
 - **Windows: "running scripts is disabled on this system"**: either
   `powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 ...` or, once,
   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`. Use `.venv\Scripts\python.exe`
@@ -643,3 +655,119 @@ company's video host; the file needs no re-encoding.
   preparation"). The reference clip stays where you recorded
   it (`voices/`, gitignored via `*.wav`); screenshots and recordings stay under
   `demo-output/` (gitignored).
+
+## Benchmark: local vs hosted vs manual
+
+`bench` runs the **same scenario** under several drivers, collects hard numbers per
+run, and writes one side-by-side table so a local model can be compared with a hosted
+one and with the manual Codex/Claude runs you did by hand. Every driver run is a normal
+kit output directory (`DIR/runs/<driver-slug>/r<N>/` with `report.md`, `result.json`,
+`logs/`, `final/`) plus a `bench.json` of metrics; the summary is `DIR/report.md` +
+`DIR/bench.json`. The bench never edits the scenario.
+
+Drivers (repeatable; default `template` when none is given): `--driver template` (no LLM
+at all: the baseline of the pipeline itself), `--driver 'llm:<base-url>|<model>'` (narration
+from an OpenAI-compatible endpoint, pipeline via `run`; quote the spec, `|` is a shell pipe in
+bash and PowerShell alike), `--driver opencode:<provider/model>`
+(the full agent path:
+`opencode run --agent demo-smoke --auto --model <provider/model> --format json --command smoke ...`),
+or `--driver opencode:<provider/model>@<base-url>` to point that provider at another
+OpenAI-compatible endpoint (its baseURL and model id are overridden for that run only).
+`--repeat N` runs each driver N times (the table shows the mean, the appendix every run).
+`--record-screen` records the **whole display** while each driver runs, one clip per run
+(`DIR/meta/clips/NN-<slug>-rN.mp4`; `gdigrab -i desktop` / `avfoundation "Capture screen N:none"`
+/ `x11grab` on `$DISPLAY`, screen 0, `:0.0` when DISPLAY is unset; 15 fps; needs a visible
+desktop, so not under `--headless` in a container), `--meta-narrate` then builds
+`DIR/meta/<slug>-bench.mp4`: the screen recordings concatenated, with a factual narration in
+the cloned voice (intro, one segment per driver with minutes, tool calls, verdict and narration
+source, an outro against every baseline entry; the template driver is quoted as the
+pipeline-only baseline, never as the "fastest driver"). `--baseline bench/baseline.json` merges
+manual rows into the same table, flagged "manual"; the file does not ship - copy
+`bench/baseline.example.json` to `bench/baseline.json` and edit it (it is kept by git on
+purpose, so your manual runs travel with the repo; drop the `!bench/baseline.json` line from
+`.gitignore` if you want it private), or point `--baseline` at the example. Optional numeric
+keys of an entry use the bench's units: `total_minutes` minutes, `video_seconds` seconds,
+`references_on_screen` a fraction 0..1, `tool_calls` / `narration_words` / `validation_retries`
+/ `tokens_total` counts, `cost` USD (a wrong one is rejected as bad input).
+Other flags: `--tts` and `--ref` are passed to every run (`run --tts` for the template/llm
+drivers; an OpenCode agent gets a `tts:<backend>` token in its smoke command and uses it in
+`synth`, except that its playbook still switches to `tone` when doctor finds no usable TTS),
+`--headless` to dryrun/record,
+`--opencode-bin PATH` picks the binary (else `OPENCODE_BIN`, then PATH), `--timeout-s N`
+bounds each run (default 3600; the whole driver process tree is killed) and
+`--llm-timeout N` is the llm driver's per-request timeout (default 180, so the kit's
+template fallback still gets its turn); `bench-meta` also takes `--bench-json PATH` and
+`--online`.
+
+bash (Linux / macOS / WSL2; replace the LM Studio model id with one `check-model --list` prints):
+
+```bash
+export OPENCODE_DISABLE_MODELS_FETCH=1   # only needed when you run opencode by hand; bench sets it for its own driver processes
+cp bench/baseline.example.json bench/baseline.json   # then edit: your own manual runs
+python -m demo_smoke bench scenarios/x.json --out demo-output/bench \
+  --driver template \
+  --driver 'llm:http://127.0.0.1:1234/v1|openai/gpt-oss-20b' \
+  --driver opencode:lmstudio/openai/gpt-oss-20b \
+  --driver opencode:anthropic/claude-sonnet-4-5 \
+  --ref voices/ref.wav --record-screen --meta-narrate \
+  --baseline bench/baseline.json
+# rebuild only the meta video from an existing bench directory (e.g. with another voice):
+python -m demo_smoke bench-meta --out demo-output/bench --ref voices/ref.wav --tts auto \
+  --baseline bench/baseline.json
+```
+
+PowerShell (Windows):
+
+```powershell
+$env:OPENCODE_DISABLE_MODELS_FETCH = "1"   # only needed when you run opencode by hand; bench sets it for its own driver processes
+Copy-Item bench\baseline.example.json bench\baseline.json   # then edit: your own manual runs
+python -m demo_smoke bench scenarios\x.json --out demo-output\bench `
+  --driver template `
+  --driver 'llm:http://127.0.0.1:1234/v1|openai/gpt-oss-20b' `
+  --driver opencode:lmstudio/openai/gpt-oss-20b `
+  --driver opencode:anthropic/claude-sonnet-4-5 `
+  --ref voices\ref.wav --record-screen --meta-narrate `
+  --baseline bench\baseline.json
+# rebuild only the meta video from an existing bench directory:
+python -m demo_smoke bench-meta --out demo-output\bench --ref voices\ref.wav --tts auto `
+  --baseline bench\baseline.json
+```
+
+`bench-meta` reads `DIR/bench.json` (`--out`, default `demo-output/bench`), takes the clips
+from `DIR/meta/clips/*.mp4` (name order = run order; `--clips a.mp4 b.mp4` overrides), writes `DIR/meta/narration.json`,
+`DIR/meta/audio/seg-*.wav` and `DIR/meta/<slug>-bench.mp4`, and logs the plan and the
+exact ffmpeg command to `DIR/meta/meta-edit.json` + `DIR/logs/bench-meta.json`. Segments
+are placed one after another with a 0.5 s gap (`--gap`); when the narration is longer
+than the recordings the last frame is held, and `--align-clips` starts each driver's
+segment no earlier than that driver's own recording (matched by the `<slug>` in the clip
+name, so `--repeat` runs of one driver share its segment; a note is logged when the option
+cannot be applied). `--tts tone` uses the obviously synthetic
+placeholder tone (no ML deps) for a dry run. `--baseline` takes the same file (list or
+`{"entries": [...]}`) as `bench`; without it the entries stored in `bench.json` are spoken.
+
+`python -m demo_smoke opencode-events EVENTS.jsonl [--out DIR] [--json]` summarises a saved
+`opencode run --format json` stream (tool calls, kit commands, steps, tokens, final status).
+For each agent run bench keeps the raw stream as `runs/<slug>/rN/logs/bench-stdout.txt` (pass
+that file to `opencode-events`); `runs/<slug>/rN/logs/opencode-events.json` is the parsed summary.
+
+**What the numbers do and do not mean.** A `template` row always "passes" when the app
+works: it proves the pipeline, not a model, and its narration is the scenario's own text.
+Minutes are the wall time of the whole driver process (Python/torch start-up, TTS model
+load, OpenCode start-up and the model's warm-up included), averaged over a driver's PASS
+runs (a row with no passing run shows the mean over every run instead, and `pass_minutes` is
+null, so a FAIL/ERROR row's minutes include timed-out runs; a run the bench had to kill on its
+timeout is ERROR even when it had delivered a video), so rows are comparable with each other
+but not with a stopwatch on the agent alone; every other mean in a row covers the same PASS
+runs and is marked `(k/n)` when it came from k of the n runs;
+tool calls (every call, file reads included; the appendix has the kit-command count),
+validation retries and the on-screen-reference fraction are mechanical, but the last one
+is a sanity check that the template scores by construction, not a quality score;
+narration *quality* is not measured - only a human ear (and the MP4 next to each row)
+can judge whether a model's sentences match what is on screen. Hosted models cost money on every run (the tokens come from
+OpenCode's events; the cost is OpenCode's own catalog estimate, not a provider figure, and is
+left blank when OpenCode has no price for the model - every `@<base-url>` override - rather
+than shown as `$0.0000`) and send your scenario, page text and screenshots
+off the machine; local runs are free and stay offline but are slower and more often fall
+back to the template narration. Manual baseline rows are what a person wrote down, not a
+measurement, so treat them as context. One run is an anecdote: use `--repeat` before
+drawing conclusions.

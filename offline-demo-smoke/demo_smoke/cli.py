@@ -17,7 +17,15 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__, dotenv, onboard_audio, onboard_scenario
+from . import (
+    __version__,
+    bench,
+    bench_meta,
+    dotenv,
+    onboard_audio,
+    onboard_scenario,
+    opencode_events,
+)
 from .env import Paths
 from .scenario import ScenarioError
 
@@ -146,6 +154,9 @@ def cmd_doctor(args) -> int:
         if args.model and tc:
             bits.append(f"tool_call={'PASS' if tc.get('pass') else 'FAIL'}")
     bits.append(f"opencode={'ok' if rep.get('opencode') else 'MISSING'}")
+    sac = rep.get("smart_app_control")
+    if sac is not None:   # Windows only
+        bits.append(f"smart_app_control={sac.upper() if sac == 'on' else sac}")
     endpoints = rep.get("local_endpoints") or []
     up = [e["name"] for e in endpoints if e.get("reachable")]
     bits.append("local_llm=" + (",".join(up) if up else "none"))
@@ -154,6 +165,8 @@ def cmd_doctor(args) -> int:
         problems.append("llm unreachable")
     if args.model and tc and not tc.get("pass"):
         problems.append("tool_call FAIL")
+    if sac == "on":   # unsigned .pyd files (torch, pandas, librosa) cannot load; the hint says how to turn it off
+        problems.append("smart_app_control ON")
     ok = not problems
     if not ok:   # contract: every exit-3 log carries "error" and "exit_code" (plus the report)
         rep["error"] = "doctor: PROBLEMS " + ", ".join(problems)
@@ -284,12 +297,15 @@ def cmd_narrate_llm(args) -> int:
     narration = _mod("narration")
     paths = Paths(args.out)
     scen = _load_scenario(args.scenario, paths)
-    narr, source, note = narration.from_llm(scen, args.base_url, args.model, timeout=args.timeout)
+    detail = narration.from_llm_detail(scen, args.base_url, args.model, timeout=args.timeout)
+    narr, source, note = detail["narration"], detail["source"], detail["note"]
     p = _write_narration(paths, narr)
     total = sum(narration.words(s["text"]) for s in narr["steps"]) \
         + narration.words(narr["intro"]) + narration.words(narr["outro"])
     _log(paths, "narrate-llm", {"path": str(p), "source": source, "note": note,
                                 "model": args.model, "base_url": args.base_url,
+                                "attempts": detail["attempts"], "problems": detail["problems"],
+                                "fallback": detail["fallback"], "fallback_reason": detail["fallback_reason"],
                                 "words": total, "narration": narr})
     _say(f"narrate-llm: ok source={source} {total} words -> {p} ({note})")
     return EXIT_OK
@@ -401,12 +417,15 @@ def cmd_run(args) -> int:
     source = args.narration
     stage = "doctor"
     timings: dict = {}
+    llm_detail: dict | None = None      # attempts / problems / fallback of the llm narration (bench reads it)
     t_run = time.time()
 
     def done(verdict: str, error: str | None = None) -> None:
         timings["total"] = round(time.time() - t_run, 1)
         _log(paths, "run", {"verdict": verdict, "error": error, "stage": stage,
-                            "narration_source": source, "timings": timings})
+                            "narration_source": source, "timings": timings,
+                            "llm": ({k: llm_detail[k] for k in ("attempts", "problems", "fallback", "fallback_reason")}
+                                    if llm_detail else None)})
         rp, jp = report.write(paths.out, scen, dry, markers, ver, env_rep, source, verdict, error)
         _say(f"run: {verdict}" + (f" ({error})" if error else "") + f" -> {rp}, {jp}")
 
@@ -438,7 +457,8 @@ def cmd_run(args) -> int:
         narration = _mod("narration")
         note = ""
         if source == "llm":
-            narr, source, note = narration.from_llm(scen, args.base_url, args.model, timeout=args.timeout)
+            llm_detail = narration.from_llm_detail(scen, args.base_url, args.model, timeout=args.timeout)
+            narr, source, note = llm_detail["narration"], llm_detail["source"], llm_detail["note"]
         else:
             narr = narration.template(scen)
         errors = narration.validate(narr, scen)
@@ -623,11 +643,19 @@ def build_parser() -> argparse.ArgumentParser:
     run_map: dict = {}
     onboard_audio.register(sub, run_map)
     onboard_scenario.register(sub, run_map)
+    # Bench commands (bench, bench-meta, opencode-events); same register() convention.  ``bench``
+    # carries --record-screen / --meta-narrate / --meta-from-clips and calls bench_meta itself.
+    bench.register(sub, run_map)
+    bench_meta.register(sub, run_map)
+    opencode_events.register(sub, run_map)
     return p
 
 
 # Commands whose --out is not a Paths() output directory (record-ref writes a WAV file).
 _NO_PATHS_OUT = ("record-ref",)
+# Commands whose --out is a plain directory with only a logs/ subfolder (bench directories hold
+# runs/<driver>/r<N>/ and meta/, never raw/ audio/ clips/ final/).
+_PLAIN_DIR_OUT = ("bench", "bench-meta")
 
 
 def _load_dotenv(argv: list[str] | None) -> None:
@@ -697,6 +725,12 @@ def _log_failure(args, msg: str, code: int) -> None:
     if not out or getattr(args, "cmd", "") == "run" or getattr(args, "cmd", "") in _NO_PATHS_OUT:
         return
     try:
-        _log(Paths(out), args.cmd, {"error": msg, "exit_code": code})
+        if args.cmd in _PLAIN_DIR_OUT:
+            logs = Path(out) / "logs"
+            logs.mkdir(parents=True, exist_ok=True)
+            (logs / f"{args.cmd}.json").write_text(
+                json.dumps({"error": msg, "exit_code": code}, indent=2), encoding="utf-8")
+        else:
+            _log(Paths(out), args.cmd, {"error": msg, "exit_code": code})
     except OSError:
         pass

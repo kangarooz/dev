@@ -24,11 +24,23 @@ has been reached" and answers with text only.
 non-JSON lines are counted (and scanned for the permission line), missing fields
 become ``None``.  Everything else in the kit that needs numbers from an OpenCode run
 (the bench driver) goes through ``parse`` + ``summary``.
+
+Cost: the ``cost`` on ``step_finish`` is OpenCode's own arithmetic from its model
+catalog, not a figure the provider sent.  A model the catalog has no price for (every
+config-defined model, so every ``@<base-url>`` bench override) is priced at 0, so
+``summary`` reports ``cost`` as ``None`` ("no price data") when it is 0 while tokens
+were counted; ``parse`` keeps the raw sum in ``usage["cost"]``.
+
+A bash call may chain several kit commands (``python -m demo_smoke doctor && python
+-m demo_smoke dryrun ...``): every one of them is listed (``kit_commands`` per call and
+in the summary) and the call's seconds are split evenly between them for the stage
+timings; ``summary["chained_kit_calls"]`` counts such calls.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections import Counter
 from collections.abc import Iterable
@@ -94,15 +106,18 @@ def _get(d: Any, *keys: str, default: Any = None) -> Any:
 
 
 def _int_or_none(v: Any) -> int | None:
+    """``int`` of a number or numeric string; ``None`` for anything else (NaN/Infinity included)."""
     if isinstance(v, bool):
         return int(v)
-    if isinstance(v, (int, float)):
-        return int(v)
+    if isinstance(v, int):
+        return v
     if isinstance(v, str):
         try:
-            return int(float(v))
+            v = float(v)
         except ValueError:
             return None
+    if isinstance(v, float):
+        return int(v) if math.isfinite(v) else None
     return None
 
 
@@ -177,6 +192,7 @@ def _tool_call(event: dict, index: int) -> dict:
         "output": _text(state.get("output") if state.get("output") is not None else meta.get("output"), 4000),
         "truncated": bool(meta.get("truncated")) if "truncated" in meta else None,
         "kit_command": kit_command_of(command),
+        "kit_commands": kit_commands_of(command),
         "denied": _looks_denied(error),
     }
     if "exit" in meta or "exit_code" in meta or "exitCode" in meta:
@@ -185,12 +201,26 @@ def _tool_call(event: dict, index: int) -> dict:
     return call
 
 
-def kit_command_of(command: str | None) -> str | None:
-    """``"dryrun"`` for ``python -m demo_smoke dryrun ...``; ``None`` for anything else."""
+def kit_commands_of(command: str | None) -> list[str]:
+    """Every kit command in a shell line: ``["doctor", "dryrun"]`` for
+    ``python -m demo_smoke doctor && python -m demo_smoke dryrun ...``; ``[]`` for anything else."""
     if not command:
-        return None
-    m = _KIT_CMD.search(command)
-    return m.group(1) if m else None
+        return []
+    return _KIT_CMD.findall(command)
+
+
+def kit_command_of(command: str | None) -> str | None:
+    """``"dryrun"`` for ``python -m demo_smoke dryrun ...`` (the first kit command of a chained
+    line); ``None`` for anything else."""
+    cmds = kit_commands_of(command)
+    return cmds[0] if cmds else None
+
+
+def _call_kit_commands(call: dict) -> list[str]:
+    cmds = call.get("kit_commands")
+    if isinstance(cmds, list) and cmds:
+        return [str(c) for c in cmds]
+    return [call["kit_command"]] if call.get("kit_command") else []
 
 
 def _permission_from_line(line: str) -> dict | None:
@@ -298,14 +328,14 @@ def parse(lines: Any) -> dict:
             if not isinstance(etype, str) or not etype:
                 etype = "<missing>"
             counts[etype] += 1
-            ts = _int_or_none(event.get("timestamp"))
-            if ts is not None:
-                first_ts = ts if first_ts is None else min(first_ts, ts)
-                last_ts = ts if last_ts is None else max(last_ts, ts)
-            sid = event.get("sessionID") or event.get("session_id") or _get(event, "part", "sessionID")
-            if session_id is None and isinstance(sid, str) and sid:
-                session_id = sid
             try:
+                ts = _int_or_none(event.get("timestamp"))
+                if ts is not None:
+                    first_ts = ts if first_ts is None else min(first_ts, ts)
+                    last_ts = ts if last_ts is None else max(last_ts, ts)
+                sid = event.get("sessionID") or event.get("session_id") or _get(event, "part", "sessionID")
+                if session_id is None and isinstance(sid, str) and sid:
+                    session_id = sid
                 if etype == "tool_use":
                     tool_calls.append(_tool_call(event, len(tool_calls)))
                 elif etype == "step_start":
@@ -405,23 +435,41 @@ def parse_file(path: str | Path) -> dict:
 def stage_seconds(tool_calls: list[dict]) -> dict[str, float | None]:
     """Wall seconds per kit stage from the tool-call timestamps (``narrate`` = all narrate-* calls).
 
-    A stage the agent never ran is ``None``; repeated calls (retries) are summed.
+    A stage the agent never ran is ``None``; repeated calls (retries) are summed.  A call
+    that chained several kit commands has its seconds split evenly between them.
     """
     out: dict[str, float | None] = {s: None for s in STAGES}
     for c in tool_calls:
-        cmd = c.get("kit_command")
-        if not cmd or c.get("seconds") is None:
+        cmds = _call_kit_commands(c)
+        if not cmds or c.get("seconds") is None:
             continue
-        stage = "narrate" if cmd in _NARRATE_CMDS else cmd
-        if stage not in out:
-            continue
-        out[stage] = round((out[stage] or 0.0) + float(c["seconds"]), 3)
+        share = float(c["seconds"]) / len(cmds)
+        for cmd in cmds:
+            stage = "narrate" if cmd in _NARRATE_CMDS else cmd
+            if stage not in out:
+                continue
+            out[stage] = round((out[stage] or 0.0) + share, 3)
     return out
 
 
+def _call_succeeded(c: dict) -> bool:
+    """A tool call that finished without an error, a denial or a non-zero exit code."""
+    if c.get("denied"):
+        return False
+    if (c.get("status") or "unknown") not in ("completed", "unknown"):
+        return False
+    return c.get("exit_code") in (None, 0)
+
+
 def wrote_narration(tool_calls: list[dict]) -> bool:
-    """Did the agent write ``audio/narration.json`` itself (edit/write tool, or a shell redirect)?"""
+    """Did the agent write ``audio/narration.json`` itself (edit/write tool, or a shell redirect)?
+
+    Only a call that succeeded counts: a write the permission rules rejected (``status ==
+    "error"``, ``denied``) or a redirect whose shell exited non-zero left no file behind.
+    """
     for c in tool_calls:
+        if not _call_succeeded(c):
+            continue
         name = (c.get("name") or "").lower()
         inp = c.get("input") if isinstance(c.get("input"), dict) else {}
         target = str(inp.get("filePath") or inp.get("file_path") or inp.get("path") or "")
@@ -437,16 +485,21 @@ def summary(parsed: dict) -> dict:
     """The numbers the bench report needs, from a ``parse`` result."""
     calls = parsed.get("tool_calls") or []
     commands = [c.get("command") for c in calls if c.get("command")]
-    kit_cmds = [c.get("kit_command") for c in calls if c.get("kit_command")]
+    kit_cmds = [k for c in calls for k in _call_kit_commands(c)]
+    chained = sum(1 for c in calls if len(_call_kit_commands(c)) > 1)
     failed = [c for c in calls if c.get("status") == "error" or (c.get("exit_code") not in (None, 0))]
     usage = parsed.get("usage") or {}
     first, last = parsed.get("first_timestamp"), parsed.get("last_timestamp")
+    cost = usage.get("cost")
+    if cost is not None and _num(cost) == 0.0 and _num(usage.get("total")) > 0:
+        cost = None         # OpenCode priced the model at 0: no catalog price, not a measured $0
     return {
         "session_id": parsed.get("session_id"),
         "final_status": parsed.get("final_status"),
         "tool_calls": len(calls),
         "commands": commands,
         "kit_commands": kit_cmds,
+        "chained_kit_calls": chained,
         "failed_tool_calls": [{"name": c.get("name"), "command": c.get("command"), "exit_code": c.get("exit_code"),
                                "error": c.get("error")} for c in failed],
         "assistant_messages": len(parsed.get("assistant_text") or []),
@@ -457,7 +510,7 @@ def summary(parsed: dict) -> dict:
         "tokens_in": usage.get("input"),
         "tokens_out": usage.get("output"),
         "tokens_total": usage.get("total"),
-        "cost": usage.get("cost"),
+        "cost": cost,
         "errors": [e.get("message") for e in parsed.get("errors") or []],
         "unknown_event_types": list(parsed.get("unknown_event_types") or []),
         "wall_s": (round((last - first) / 1000.0, 3) if first is not None and last is not None else None),
@@ -502,7 +555,9 @@ def cmd_opencode_events(args) -> int:
 def register(subparsers, run_map: dict) -> None:
     """Add ``opencode-events`` to an argparse subparsers object; fill ``run_map``."""
     sp = subparsers.add_parser("opencode-events", help="summarise saved `opencode run --format json` output")
-    sp.add_argument("file", metavar="EVENTS.jsonl")
+    sp.add_argument("file", metavar="EVENTS.jsonl",
+                    help="saved `opencode run --format json` stream (bench keeps each agent run's as "
+                         "runs/<slug>/rN/logs/bench-stdout.txt; its logs/opencode-events.json is the parsed summary)")
     sp.add_argument("--out", default=None, help="output directory for logs/opencode-events.json (optional)")
     sp.add_argument("--json", action="store_true", help="print the summary as JSON")
     sp.set_defaults(fn=cmd_opencode_events)

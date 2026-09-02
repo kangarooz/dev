@@ -10,6 +10,7 @@ Run the full demo smoke playbook for one scenario.
 
 If the output directory line above is empty, use `demo-output/<slug>` where `<slug>` is the `"slug"` field of the scenario.
 If the extra arguments contain the word `headless`, add `--headless` to the dryrun and record commands.
+If the extra arguments contain a token `tts:<name>` (for example `tts:tone`), use `--tts <name>` instead of `--tts auto` in the synth step; step 1's rule (`--tts tone` when doctor finds no usable TTS) still wins.
 If the extra arguments contain a path ending in `.wav`, or the user mentioned a reference voice WAV, pass it as `--ref <path>` in the synth step; otherwise omit `--ref`.
 
 Scenario contents:

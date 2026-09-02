@@ -26,7 +26,9 @@ param(
   [switch]$SkipClaude      # do not install Claude Code (only needed for Remote Control)
 )
 
-$ErrorActionPreference = 'Stop'
+# 'Continue', not 'Stop': in Windows PowerShell 5.1 native commands (git, py, npm, winget)
+# that write to stderr would otherwise abort the script. Exit codes are checked explicitly.
+$ErrorActionPreference = 'Continue'
 $ProgressPreference = 'SilentlyContinue'
 
 function Say($m) { Write-Host "`n== $m" -ForegroundColor Cyan }
@@ -44,7 +46,10 @@ if (-not $isAdmin) { Fail 'Run this in an elevated PowerShell (right-click > Run
 if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
   Fail 'winget is missing. Install "App Installer" from the Microsoft Store, then re-run.'
 }
-Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
+# Best effort only: this script already runs under -ExecutionPolicy Bypass. A machine-wide
+# policy can override the CurrentUser scope, which throws; that is harmless here.
+try { Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction Stop }
+catch { Warn 'could not set CurrentUser execution policy (overridden by a wider scope); continuing under Bypass' }
 Say "machine: $env:COMPUTERNAME  user: $env:USERNAME  PowerShell $($PSVersionTable.PSVersion)"
 
 # ---------------------------------------------------------------- winget installs
@@ -58,7 +63,11 @@ function Ensure-App([string]$Id, [scriptblock]$Present) {
 
 Say 'prerequisites (winget)'
 Ensure-App 'Git.Git'            { [bool](Get-Command git -ErrorAction SilentlyContinue) }
-Ensure-App 'Python.Python.3.11' { (Get-Command py -ErrorAction SilentlyContinue) -and ((& py -3.11 -c 'print(1)' 2>$null) -eq '1') }
+function Test-Py311 {
+  if (-not (Get-Command py -ErrorAction SilentlyContinue)) { return $false }
+  try { $out = & cmd /c 'py -3.11 -c "print(1)" 2>nul'; return ("$out".Trim() -eq '1') } catch { return $false }
+}
+Ensure-App 'Python.Python.3.11' { Test-Py311 }
 Ensure-App 'Google.Chrome'      { (Test-Path "$env:ProgramFiles\Google\Chrome\Application\chrome.exe") -or
                                   (Test-Path "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe") -or
                                   (Test-Path "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe") }
@@ -68,7 +77,11 @@ Refresh-Path
 # ---------------------------------------------------------------- npm installs
 Say 'OpenCode (npm)'
 if (Get-Command opencode -ErrorAction SilentlyContinue) { Write-Host "   opencode $(opencode --version) already present" }
-else { npm install -g opencode-ai | Out-Null; Refresh-Path; Write-Host "   opencode $(opencode --version)" }
+else {
+  npm install -g opencode-ai | Out-Null
+  if ($LASTEXITCODE -ne 0) { Fail "npm install -g opencode-ai failed (exit $LASTEXITCODE)" }
+  Refresh-Path; Write-Host "   opencode $(opencode --version)"
+}
 
 if (-not $SkipClaude) {
   Say 'Claude Code (npm) - for Remote Control from the phone/web'
@@ -82,9 +95,11 @@ if (Test-Path (Join-Path $Root '.git')) {
   git -C $Root fetch origin $Branch
   git -C $Root checkout $Branch
   git -C $Root pull --ff-only origin $Branch
+  if ($LASTEXITCODE -ne 0) { Fail "git update failed in $Root (exit $LASTEXITCODE)" }
 } else {
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Root) | Out-Null
   git clone --branch $Branch $Repo $Root
+  if ($LASTEXITCODE -ne 0) { Fail "git clone failed (exit $LASTEXITCODE)" }
 }
 $Kit = Join-Path $Root 'offline-demo-smoke'
 if (-not (Test-Path (Join-Path $Kit 'scripts\setup.ps1'))) { Fail "kit not found at $Kit" }

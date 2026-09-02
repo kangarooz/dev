@@ -1,0 +1,84 @@
+{
+  "$schema": "./schema.json",
+  "name": "Chat with Manuals",
+  "slug": "chat-with-manuals",
+  "app_url": "http://localhost:3000",
+  "viewport": {"width": 1920, "height": 1080},
+  "login": {
+    "type": "form",
+    "url": "/login",
+    "username_selector": "input[name=username]",
+    "password_selector": "input[name=password]",
+    "submit_selector": "button[type=submit]",
+    "username_env": "DEMO_USER",
+    "password_env": "DEMO_PASS",
+    "success_selector": "nav .user-menu"
+  },
+  "max_length_seconds": 90,
+  "intro": "This is Legion's Chat with Manuals feature, where a technician can ask questions about equipment manuals and get answers with citations.",
+  "outro": "That is the whole flow: sign in, add a manual, ask a question, and get a cited answer, all running on a local build.",
+  "steps": [
+    {
+      "id": "open",
+      "title": "Open Chat with Manuals",
+      "narration": "I start on the Legion home screen and open Chat with Manuals from the main navigation.",
+      "actions": [
+        {"goto": "/"},
+        {"click": "a[href='/manuals']"},
+        {"wait_for": {"text": "Chat with Manuals", "timeout_s": 20}}
+      ],
+      "expect": [
+        {"text": "Chat with Manuals"},
+        {"url_contains": "/manuals"}
+      ],
+      "timeout_s": 30
+    },
+    {
+      "id": "upload",
+      "title": "Upload a manual",
+      "narration": "Next I upload the OSHA ladder safety manual as a PDF, and it appears as a document chip once it has been indexed.",
+      "actions": [
+        {"upload": {"selector": "input[type=file]", "files": ["fixtures/osha-1910.pdf"]}},
+        {"wait_for": {"selector": ".doc-chip", "timeout_s": 60}}
+      ],
+      "expect": [
+        {"selector": ".doc-chip", "count_min": 1},
+        {"selector": ".doc-chip", "contains": "osha-1910"}
+      ],
+      "timeout_s": 90
+    },
+    {
+      "id": "ask",
+      "title": "Ask a question",
+      "narration": "Now I ask how often ladders need to be inspected, and send the question to the assistant.",
+      "actions": [
+        {"click": "textarea"},
+        {"type": {"selector": "textarea", "text": "What is the ladder inspection interval?", "delay_ms": 40}},
+        {"press": "Enter"},
+        {"wait_for": {"selector": ".answer", "timeout_s": 60}}
+      ],
+      "expect": [
+        {"selector": ".answer", "contains": "inspect"},
+        {"text": "[1]"}
+      ],
+      "timeout_s": 90
+    },
+    {
+      "id": "citation",
+      "title": "Open the citation",
+      "narration": "Finally I click the citation marker, and the source page from the manual opens beside the answer so I can verify it.",
+      "actions": [
+        {"hover": ".answer .citation"},
+        {"click": ".answer .citation"},
+        {"wait_for": {"selector": ".source-panel", "timeout_s": 20}},
+        {"screenshot": "citation-open"}
+      ],
+      "expect": [
+        {"selector": ".source-panel", "count_min": 1},
+        {"selector": ".source-panel", "contains": "1910"},
+        {"not_text": "Something went wrong"}
+      ],
+      "timeout_s": 45
+    }
+  ]
+}

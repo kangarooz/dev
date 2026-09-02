@@ -121,7 +121,7 @@ def _count_words(text: str) -> int:
 def tone(text: str, sr: int = SR) -> tuple[np.ndarray, int]:
     """Obviously-synthetic placeholder narration: 220 Hz, 8 Hz tremolo, -20 dBFS peak."""
     seconds = max(MIN_SECONDS, _count_words(text) / WORDS_PER_SECOND)
-    n = int(round(seconds * sr))
+    n = round(seconds * sr)
     t = np.arange(n, dtype=np.float64) / sr
     carrier = np.sin(2 * math.pi * TONE_HZ * t)
     tremolo = 0.7 + 0.3 * np.sin(2 * math.pi * TONE_AM_HZ * t)

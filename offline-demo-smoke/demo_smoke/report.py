@@ -30,6 +30,9 @@ def _artifacts(out: Path) -> list[str]:
             rel = _rel(p, out)
             if rel not in found:
                 found.append(rel)
+    for always in ("report.md", "result.json"):   # written by write() right after
+        if always not in found:
+            found.append(always)
     return found
 
 

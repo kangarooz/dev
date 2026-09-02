@@ -22,7 +22,7 @@ from pathlib import Path
 class _QuietHandler(SimpleHTTPRequestHandler):
     basic_auth: tuple[str, str] | None = None
 
-    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+    def log_message(self, format, *args):
         pass
 
     def end_headers(self):
@@ -46,13 +46,13 @@ class _QuietHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self):  # noqa: N802 - stdlib naming
+    def do_GET(self):
         if not self._authorized():
             self._deny()
             return
         super().do_GET()
 
-    def do_HEAD(self):  # noqa: N802 - stdlib naming
+    def do_HEAD(self):
         if not self._authorized():
             self._deny()
             return

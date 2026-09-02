@@ -169,8 +169,8 @@ def _summarize_expect(e: dict) -> str:
 def build_request(scenario: dict) -> str:
     lines = [
         f"App: {scenario.get('name')}",
-        f"Total word budget: {word_budget(scenario)} words "
-        f"(video max {scenario.get('max_length_seconds', 90)} s).",
+        (f"Total word budget: {word_budget(scenario)} words "
+         f"(video max {scenario.get('max_length_seconds', 90)} s)."),
         f"Max {MAX_SEGMENT_WORDS} words per segment.",
         "",
     ]

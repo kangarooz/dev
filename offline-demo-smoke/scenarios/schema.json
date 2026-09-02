@@ -1,0 +1,176 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.invalid/offline-demo-smoke/scenario.schema.json",
+  "title": "Offline demo smoke scenario",
+  "description": "One feature smoke test that is also the script for a narrated screen recording. The kit validates this shape by hand (demo_smoke/scenario.py); this schema is the documented reference and works with editors that understand JSON Schema draft-07.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "app_url", "steps"],
+  "properties": {
+    "$schema": {"type": "string", "description": "Optional editor hint pointing at this schema file."},
+    "name": {
+      "type": "string", "minLength": 1,
+      "description": "Human name of the feature; used in the report title and in template narration.",
+      "examples": ["Chat with Manuals"]
+    },
+    "slug": {
+      "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$",
+      "description": "File-name-safe id used for final/<slug>.mp4. Defaults to a slugified name."
+    },
+    "app_url": {
+      "type": "string", "format": "uri", "pattern": "^https?://",
+      "description": "Base URL of the app under test. Relative `goto` paths are resolved against it.",
+      "examples": ["http://localhost:3000"]
+    },
+    "viewport": {
+      "type": "object", "additionalProperties": false,
+      "description": "Browser viewport (and the recorded frame size). Default 1920x1080.",
+      "required": ["width", "height"],
+      "properties": {
+        "width": {"type": "integer", "minimum": 1},
+        "height": {"type": "integer", "minimum": 1}
+      }
+    },
+    "login": {
+      "description": "How to authenticate before the first step. Default {\"type\": \"none\"}. Credentials are never stored in the scenario: form/basic logins read them from the named environment variables.",
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "properties": {"type": {"const": "none"}},
+          "required": ["type"]
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "username_selector", "password_selector", "submit_selector", "username_env", "password_env"],
+          "properties": {
+            "type": {"const": "form"},
+            "url": {"type": "string", "description": "Login page path or absolute URL. Default: app_url."},
+            "username_selector": {"type": "string", "minLength": 1},
+            "password_selector": {"type": "string", "minLength": 1},
+            "submit_selector": {"type": "string", "minLength": 1},
+            "username_env": {"type": "string", "minLength": 1, "description": "Env var holding the user name, e.g. DEMO_USER."},
+            "password_env": {"type": "string", "minLength": 1, "description": "Env var holding the password, e.g. DEMO_PASS."},
+            "success_selector": {"type": "string", "minLength": 1, "description": "Optional selector that must appear after a successful login."}
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["type", "username_env", "password_env"],
+          "properties": {
+            "type": {"const": "basic"},
+            "username_env": {"type": "string", "minLength": 1},
+            "password_env": {"type": "string", "minLength": 1}
+          },
+          "description": "HTTP basic auth sent with every request."
+        }
+      ]
+    },
+    "max_length_seconds": {
+      "type": "number", "exclusiveMinimum": 0, "default": 90,
+      "description": "Target length of the final video. Narration is capped at max_length_seconds * 2.6 words; verify fails if the video is longer than this + 10 s."
+    },
+    "intro": {
+      "type": "string",
+      "description": "One or two sentences spoken over the first screen before any action. Max 45 words."
+    },
+    "outro": {
+      "type": "string",
+      "description": "One or two sentences spoken at the end while the last screen is held. Max 45 words."
+    },
+    "steps": {
+      "type": "array", "minItems": 1,
+      "description": "Ordered steps. Each step runs its actions, then checks its expectations; narration for the step is spoken while it runs.",
+      "items": {"$ref": "#/definitions/step"}
+    }
+  },
+  "definitions": {
+    "step": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "title", "actions"],
+      "properties": {
+        "id": {
+          "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*$",
+          "description": "Unique short id; used for screenshots (logs/step-NN-<id>.png), audio segments (audio/seg-<id>.wav) and narration ids."
+        },
+        "title": {"type": "string", "minLength": 1, "description": "Shown in the report; also seeds template narration (\"Now I <title>\")."},
+        "narration": {"type": "string", "description": "What is said during this step (first person, present tense, max 45 words). Used by narrate-template and as a hint for narrate-llm."},
+        "actions": {"type": "array", "items": {"$ref": "#/definitions/action"}, "description": "Executed in order."},
+        "expect": {"type": "array", "items": {"$ref": "#/definitions/expect"}, "default": [], "description": "All must hold (within timeout_s) for the step to PASS."},
+        "timeout_s": {"type": "number", "exclusiveMinimum": 0, "default": 60, "description": "Budget for the whole step (actions + expectations)."}
+      }
+    },
+    "action": {
+      "description": "Exactly one key naming the action.",
+      "type": "object", "minProperties": 1, "maxProperties": 1, "additionalProperties": false,
+      "properties": {
+        "goto": {"type": "string", "minLength": 1, "description": "Path (resolved against app_url) or absolute URL to navigate to."},
+        "click": {"type": "string", "minLength": 1, "description": "CSS/Playwright selector to move the cursor to and click."},
+        "fill": {
+          "type": "object", "additionalProperties": false, "required": ["selector", "text"],
+          "properties": {"selector": {"type": "string", "minLength": 1}, "text": {"type": "string"}},
+          "description": "Set an input's value at once."
+        },
+        "type": {
+          "type": "object", "additionalProperties": false, "required": ["selector", "text"],
+          "properties": {
+            "selector": {"type": "string", "minLength": 1},
+            "text": {"type": "string"},
+            "delay_ms": {"type": "number", "minimum": 0, "default": 30, "description": "Per-keystroke delay so typing is visible on video."}
+          },
+          "description": "Type text key by key (visible typing)."
+        },
+        "press": {"type": "string", "minLength": 1, "description": "Keyboard key, e.g. Enter, Tab, Control+K."},
+        "upload": {
+          "type": "object", "additionalProperties": false, "required": ["selector", "files"],
+          "properties": {
+            "selector": {"type": "string", "minLength": 1, "description": "Selector of an input[type=file]."},
+            "files": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "File paths; relative paths are resolved against the scenario file's directory."}
+          }
+        },
+        "hover": {"type": "string", "minLength": 1, "description": "Selector to move the cursor over."},
+        "scroll": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "selector": {"type": "string", "minLength": 1, "description": "Scroll this element into view."},
+            "y": {"type": "number", "description": "Scroll the page vertically by this many pixels."}
+          },
+          "oneOf": [{"required": ["selector"]}, {"required": ["y"]}]
+        },
+        "wait": {
+          "type": "object", "additionalProperties": false, "required": ["ms"],
+          "properties": {"ms": {"type": "number", "minimum": 0}},
+          "description": "Fixed pause (use sparingly; prefer wait_for)."
+        },
+        "wait_for": {
+          "type": "object", "additionalProperties": false,
+          "properties": {
+            "selector": {"type": "string", "minLength": 1},
+            "text": {"type": "string", "minLength": 1},
+            "timeout_s": {"type": "number", "exclusiveMinimum": 0}
+          },
+          "oneOf": [{"required": ["selector"]}, {"required": ["text"]}],
+          "description": "Wait until a selector is visible or page text appears. The wait is recorded as a wait window that `edit` may speed up."
+        },
+        "screenshot": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$", "description": "Save an extra screenshot to logs/<name>.png."}
+      }
+    },
+    "expect": {
+      "description": "Exactly one of text / selector / url_contains / not_text.",
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "text": {"type": "string", "minLength": 1, "description": "Visible page text contains this string."},
+        "selector": {"type": "string", "minLength": 1, "description": "At least one visible element matches."},
+        "contains": {"type": "string", "description": "With selector: the matched element's text contains this."},
+        "count_min": {"type": "integer", "minimum": 0, "description": "With selector: at least this many matches."},
+        "url_contains": {"type": "string", "minLength": 1, "description": "Current page URL contains this string."},
+        "not_text": {"type": "string", "minLength": 1, "description": "Visible page text does NOT contain this string (e.g. an error banner)."}
+      },
+      "oneOf": [
+        {"required": ["text"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["url_contains"]}, {"required": ["not_text"]}, {"required": ["contains"]}, {"required": ["count_min"]}]}},
+        {"required": ["selector"], "not": {"anyOf": [{"required": ["text"]}, {"required": ["url_contains"]}, {"required": ["not_text"]}]}},
+        {"required": ["url_contains"], "not": {"anyOf": [{"required": ["text"]}, {"required": ["selector"]}, {"required": ["not_text"]}, {"required": ["contains"]}, {"required": ["count_min"]}]}},
+        {"required": ["not_text"], "not": {"anyOf": [{"required": ["text"]}, {"required": ["selector"]}, {"required": ["url_contains"]}, {"required": ["contains"]}, {"required": ["count_min"]}]}}
+      ]
+    }
+  }
+}

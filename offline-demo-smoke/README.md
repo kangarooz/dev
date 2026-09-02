@@ -20,6 +20,13 @@ What actually happens (`python -m demo_smoke run scenario.json`):
 The only thing an LLM ever does is (a) run these commands and (b) write
 narration text. Everything else is deterministic Python.
 
+## Verified environments
+
+| Date | Machine | Result |
+|---|---|---|
+| 2026-09-02 | Windows 11 tablet, Python 3.11.9, Chrome 152, ffmpeg 9.0 (gyan.dev), torch CPU, Chatterbox Turbo weights cached, Smart App Control off | `doctor` ok, `run` on the bundled mock app PASS (27 s MP4), relative `--out`, no workarounds |
+| 2026-09-02 | Linux container (CI-style), Chromium 152 headless, bundled imageio-ffmpeg 7.0.2, no GPU, synthetic voice | full test suite (616 tests) incl. `run` and `bench` end to end with the real OpenCode binary |
+
 ## Requirements
 
 | Need | Notes |

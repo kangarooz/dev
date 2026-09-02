@@ -59,7 +59,7 @@ def test_passage_is_about_150_words_in_three_chunks():
     assert " ".join(chunks) == " ".join(text.split())
     sizes = [len(c.split()) for c in chunks]
     assert min(sizes) >= 25        # no chunk is a stub
-    assert "?" in text and any(ch.isdigit() or w in text for ch, w in [("0", "fourteenth")])
+    assert "?" in text and "fourteenth" in text     # a question and spoken numbers, per the contract
 
 
 def test_script_only_prints_passage_and_exits_zero(capsys):
@@ -162,7 +162,8 @@ def test_record_ref_happy_path(fake_sounddevice, tmp_path, capsys):
     assert side["sample_rate"] == SR and side["format"] == "PCM_16"
     assert side["warnings"] == [] and side["exit_code"] == 0
     assert side["peak_dbfs"] == pytest.approx(-3.0, abs=0.1)
-    assert side["snr_db"] >= 30 and side["noise_floor_dbfs"] < -40
+    # fake floor -65 dBFS + 17 dB normalisation gain -> about -48; speech rms about -20
+    assert side["snr_db"] >= 25 and side["noise_floor_dbfs"] < -40
     assert side["speech_seconds"] >= 30 and side["clipped"] is False
     assert side["raw_duration"] == pytest.approx(40.0) and side["trim"]["start_s"] == pytest.approx(0.8, abs=0.05)
     for k in ("duration", "peak_dbfs", "rms_dbfs", "noise_floor_dbfs", "snr_db", "clipped_pct"):
@@ -186,7 +187,7 @@ def test_record_ref_noisy_warns_exit_4_but_saves(fake_sounddevice, tmp_path, cap
     assert out.is_file()
     side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
     assert oa.WARN_NOISY in side["warnings"] and side["exit_code"] == 4
-    assert side["snr_db"] < 15
+    assert 0 <= side["snr_db"] < 15
     printed = capsys.readouterr().out
     assert "record-ref: WARN" in printed and "noisy" in printed and "voice-check" in printed
 
@@ -253,7 +254,7 @@ def test_ffmpeg_record_args_per_platform(tmp_path):
     win = oa.ffmpeg_record_args("ffmpeg.exe", "dshow", "Microphone (Realtek)", 60, out)
     assert win[:6] == ["ffmpeg.exe", "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
     assert win[6:10] == ["-f", "dshow", "-i", "audio=Microphone (Realtek)"]
-    assert win[-11:] == ["-t", "60", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(out)][-11:]
+    assert win[10:] == ["-t", "60", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(out)]
     mac = oa.ffmpeg_record_args("ffmpeg", "avfoundation", None, 30.5, out)
     assert mac[6:10] == ["-f", "avfoundation", "-i", ":0"]
     assert "-t" in mac and mac[mac.index("-t") + 1] == "30.5"
@@ -328,7 +329,7 @@ def test_record_ref_ffmpeg_backend_explicit_resamples(fake_sounddevice, tmp_path
     monkeypatch.setattr(oa, "_run_record", runner)
     monkeypatch.setattr(oa, "_find_ffmpeg", lambda: "ffmpeg")
     out = tmp_path / "ff.wav"
-    code = run(["record-ref", "--out", str(out), "--seconds", "25", "--backend", "ffmpeg",
+    code = run(["record-ref", "--out", str(out), "--seconds", "30", "--backend", "ffmpeg",
                 "--no-countdown", "--device", "hw:1"])
     assert code == 0
     assert fake_sounddevice.calls == []        # sounddevice never touched

@@ -420,7 +420,7 @@ def validate_file(path: str | Path, env_file: str | None = None) -> dict:
     for key in ("username_env", "password_env"):
         var = login.get(key)
         if var:
-            value, source = dotenv.lookup(var, env_file)
+            value, _source = dotenv.lookup(var, env_file)
             if value is None:
                 res["warnings"].append(f"login.{key} {var} is not set (environment or .env): "
                                        f"run `python -m demo_smoke creds set {var}`")
@@ -544,6 +544,8 @@ def choose_selector(el: dict, count_fn) -> tuple[str, int]:
         try:
             n = int(count_fn(cand))
         except Exception:  # noqa: BLE001 - an unsupported selector just is not a candidate
+            n = -1
+        if n < 0:
             continue
         if n == 1:
             return cand, 1

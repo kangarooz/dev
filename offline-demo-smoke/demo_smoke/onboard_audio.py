@@ -170,7 +170,7 @@ def frame_rms_db(a: np.ndarray, sr: int, frame_ms: int = FRAME_MS) -> np.ndarray
     size = max(1, int(sr * frame_ms / 1000))
     if x.size == 0:
         return np.zeros(0)
-    n = int(math.ceil(x.size / size))
+    n = math.ceil(x.size / size)
     padded = np.zeros(n * size)
     padded[: x.size] = x
     rms = np.sqrt(np.mean(padded.reshape(n, size) ** 2, axis=1))
@@ -238,9 +238,10 @@ def analyze(a: np.ndarray, sr: int, clipped_percent: float = 0.0) -> dict:
         lin = 10 ** (frames[speech] / 20.0)
         speech_rms = _db(float(np.sqrt(np.mean(lin ** 2))))
         speech_seconds = float(speech.sum()) * frame_s
-    else:
+        snr = speech_rms - noise_floor
+    else:   # nothing stands out of the floor: report the (small) overall headroom, never negative
         speech_rms, speech_seconds = rms_db, 0.0
-    snr = speech_rms - noise_floor if speech.any() else 0.0
+        snr = max(0.0, rms_db - noise_floor)
     return {
         "duration": round(duration, 3),
         "peak_dbfs": _round(peak_db),
@@ -467,7 +468,7 @@ def record_sounddevice(seconds: float, device: int | None = None, sr: int = SAMP
     sd = _import_sounddevice()
     if sd is None:
         raise RecordError("sounddevice not importable (pip install sounddevice; Linux needs libportaudio2)")
-    frames = int(round(seconds * sr))
+    frames = round(seconds * sr)
     try:
         kw = {"samplerate": sr, "channels": 1, "dtype": "float32"}
         if device is not None:
@@ -559,7 +560,7 @@ def _unlink(p: Path) -> None:
 
 def _resample(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     """Linear resampling (only reached when ffmpeg ignored ``-ar``)."""
-    n_out = int(round(x.size * sr_out / float(sr_in)))
+    n_out = round(x.size * sr_out / float(sr_in))
     if x.size < 2 or n_out < 2:
         return np.asarray(x, dtype=np.float32)
     src = np.linspace(0.0, 1.0, x.size)
@@ -666,7 +667,8 @@ def cmd_record_ref(args) -> int:
         if out.suffix.lower() != ".wav":
             _err(f"record-ref: --out must end in .wav, got {out}")
             return EXIT_BAD_INPUT
-        seconds = float(getattr(args, "seconds", DEFAULT_SECONDS) or DEFAULT_SECONDS)
+        seconds = getattr(args, "seconds", None)
+        seconds = DEFAULT_SECONDS if seconds is None else float(seconds)
         if seconds <= 0:
             _err("record-ref: --seconds must be positive")
             return EXIT_BAD_INPUT
@@ -683,7 +685,7 @@ def cmd_record_ref(args) -> int:
     except RecordError as e:
         _err(f"record-ref: {e}")
         return EXIT_ERROR
-    except Exception as e:  # noqa: BLE001 - one line, exit 3, never a traceback past the CLI
+    except Exception as e:  # one line, exit 3, never a traceback past the CLI
         if os.environ.get("DEMO_SMOKE_DEBUG"):
             raise
         _err(f"record-ref: {_one_line(e)}")
@@ -711,7 +713,7 @@ def cmd_devices(args) -> int:
     except KeyboardInterrupt:
         _err("devices: interrupted")
         return EXIT_INTERRUPTED
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         if os.environ.get("DEMO_SMOKE_DEBUG"):
             raise
         _err(f"devices: {_one_line(e)}")

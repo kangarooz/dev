@@ -52,19 +52,18 @@ def _stdin(monkeypatch, text: str) -> None:
 
 
 def test_parse_handles_quotes_comments_and_export():
-    text = "\n".join([
-        "# comment",
-        "PLAIN=hello",
-        "export EXPORTED=yes",
-        'DQ="a b \\"quoted\\" \\n end"',
-        "SQ='raw \\n # not a comment'",
-        "TRAILING=value # comment",
-        "URLISH=http://x/#frag",
-        "lower=ignored",
-        "NOEQUALS",
-        "EMPTY=",
-        "",
-    ])
+    text = (
+        "# comment\n"
+        "PLAIN=hello\n"
+        "export EXPORTED=yes\n"
+        'DQ="a b \\"quoted\\" \\n end"\n'
+        "SQ='raw \\n # not a comment'\n"
+        "TRAILING=value # comment\n"
+        "URLISH=http://x/#frag\n"
+        "lower=ignored\n"
+        "NOEQUALS\n"
+        "EMPTY=\n"
+    )
     vals = dotenv.parse(text)
     assert vals == {
         "PLAIN": "hello",

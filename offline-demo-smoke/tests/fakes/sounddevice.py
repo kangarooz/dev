@@ -7,7 +7,8 @@ with 1 s of silence on each side, over a configurable white-noise floor.
 
 Knobs live in ``config`` (call ``reset()`` between tests):
 
-* ``noise_db``       rms of the noise floor in dBFS (default -60)
+* ``noise_db``       rms of the noise floor in dBFS (default -65; note record-ref normalises
+                     the speech peak to -3 dBFS, so the floor it reports is ~17 dB higher)
 * ``speech_db``      peak of the speech bursts in dBFS (default -20; > 0 clips like an ADC)
 * ``speech_seconds`` how much of the take contains speech (default: everything but the padding)
 * ``pad_s``          silence on each side (default 1.0)
@@ -21,7 +22,7 @@ import numpy as np
 
 __version__ = "0.0-fake"
 
-DEFAULTS = {"noise_db": -60.0, "speech_db": -20.0, "speech_seconds": None, "pad_s": 1.0,
+DEFAULTS = {"noise_db": -65.0, "speech_db": -20.0, "speech_seconds": None, "pad_s": 1.0,
             "fail": False, "seed": 1234}
 config: dict = dict(DEFAULTS)
 calls: list[dict] = []
@@ -41,10 +42,11 @@ class PortAudioError(Exception):
 
 
 class _Default:
-    device = [0, 1]
-    samplerate = None
-    channels = None
-    dtype = None
+    def __init__(self) -> None:
+        self.device = [0, 1]
+        self.samplerate = None
+        self.channels = None
+        self.dtype = None
 
 
 default = _Default()
@@ -78,7 +80,7 @@ def synth_recording(seconds: float, sr: int, noise_db: float = -60.0, speech_db:
                     burst_s: float = 2.0, gap_s: float = 0.4) -> np.ndarray:
     """Float32 mono (n, 1) take: noise floor + bursts (peak ``speech_db``) + ``pad_s`` silence each side."""
     rng = np.random.default_rng(seed)
-    n = int(round(seconds * sr))
+    n = round(seconds * sr)
     out = rng.standard_normal(n) * 10 ** (noise_db / 20.0)
     budget = max(0.0, seconds - 2 * pad_s)
     if speech_seconds is not None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 
 PROBE_TOOL = {
@@ -44,6 +45,22 @@ def normalize_base_url(base_url: str) -> str:
     return url
 
 
+_LOOPBACK = ("localhost", "127.0.0.1", "::1", "0.0.0.0")
+
+
+def opener_for(url: str) -> urllib.request.OpenerDirector:
+    """An opener that never sends loopback requests through ``HTTP_PROXY``.
+
+    urllib applies the proxy env vars to every host unless it is listed in
+    ``no_proxy``; on a box with a corporate proxy that makes the local Ollama /
+    llama.cpp server look unreachable.  Loopback hosts get a proxy-free opener.
+    """
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    if host in _LOOPBACK or host.startswith("127."):
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return urllib.request.build_opener()
+
+
 def _headers() -> dict:
     h = {"Content-Type": "application/json", "Accept": "application/json"}
     key = os.environ.get("DEMO_SMOKE_API_KEY") or os.environ.get("OPENAI_API_KEY")
@@ -56,7 +73,7 @@ def _request(method: str, url: str, body: dict | None, timeout: int) -> dict:
     data = json.dumps(body).encode("utf-8") if body is not None else None
     req = urllib.request.Request(url, data=data, method=method, headers=_headers())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener_for(url).open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
     except urllib.error.HTTPError as e:
         excerpt = ""
@@ -88,7 +105,7 @@ def reachable(base_url: str, timeout: int = 5) -> bool:
         return False
     req = urllib.request.Request(url, method="GET", headers=_headers())
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with opener_for(url).open(req, timeout=timeout) as resp:
             return resp.status < 500
     except urllib.error.HTTPError as e:
         return e.code < 500
@@ -100,7 +117,7 @@ def chat(base_url: str, model: str, messages: list, tools: list | None = None,
          timeout: int = 120, temperature: float = 0.1, response_json: bool = False) -> dict:
     """POST /chat/completions and return the raw response dict.  Raises LLMError."""
     if not model:
-        raise LLMError("no --model given (e.g. --model qwen2.5:7b)")
+        raise LLMError("no --model given (e.g. --model qwen3-coder:30b)")
     url = normalize_base_url(base_url) + "/chat/completions"
     body: dict = {
         "model": model,

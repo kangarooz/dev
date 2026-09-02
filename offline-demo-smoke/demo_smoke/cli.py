@@ -107,13 +107,29 @@ def _step_summary(steps: list[dict]) -> str:
     return " ".join(f"{s.get('id')}={s.get('status')}" for s in steps)
 
 
+def _bad_input(paths: Paths, cmd: str, msg: str) -> int:
+    _log(paths, cmd, {"error": msg, "exit_code": EXIT_BAD_INPUT})
+    _err(msg)
+    return EXIT_BAD_INPUT
+
+
+def _record_failure(m: dict) -> str | None:
+    """Why a recording is not usable: a login/pipeline error or any step that did not PASS."""
+    if m.get("error"):
+        return str(m["error"])
+    bad = [f"{s.get('id')}={s.get('status')}" for s in m.get("steps", []) if s.get("status") != "PASS"]
+    if bad or m.get("verdict", "PASS") != "PASS":
+        return "steps failed during recording: " + (", ".join(bad) or "no step passed")
+    return None
+
+
 # --------------------------------------------------------------------------- commands
 
 
 def cmd_doctor(args) -> int:
     env = _mod("env")
     paths = Paths(args.out)
-    rep = env.detect(args.base_url, args.model)
+    rep = env.detect(args.base_url, args.model, timeout=args.timeout)
     _log(paths, "doctor", rep)
     llm = rep.get("llm") or {}
     tc = llm.get("tool_call") or {}
@@ -123,6 +139,9 @@ def cmd_doctor(args) -> int:
         f"torch={rep['torch_device']}",
         f"chatterbox={'yes' if rep['chatterbox'] else 'no'}",
     ]
+    if rep.get("tts_auto"):
+        bits.append(f"tts_auto={rep['tts_auto']}")
+        bits.append(f"tts_ready={'yes' if rep.get('tts_ready') else 'NO'}")
     if args.base_url:
         bits.append(f"llm={'reachable' if llm.get('reachable') else 'UNREACHABLE'}")
         if args.model and tc:
@@ -162,12 +181,14 @@ def cmd_prefetch(args) -> int:
     if dev == "none":
         raise PipelineError("torch is not installed; pip install -r requirements-tts.txt")
     device = "cpu" if dev == "cpu" else ("cuda" if dev == "rocm" else dev)
+    backend = tts.resolve_backend(args.tts)   # "auto" -> what run/synth --tts auto will use here
     t0 = time.time()
-    tts.load_model(args.tts, device=device, online=True)
+    tts.load_model(backend, device=device, online=True)
     cache = env.hf_cache_dir()
-    _log(paths, "prefetch", {"tts": args.tts, "device": device, "hf_cache": cache,
+    _log(paths, "prefetch", {"tts": args.tts, "backend": backend, "device": device, "hf_cache": cache,
                              "seconds": round(time.time() - t0, 1)})
-    _say(f"prefetch: ok tts={args.tts} weights cached under {cache}")
+    _say(f"prefetch: ok tts={args.tts}" + (f" (resolved to {backend})" if backend != args.tts else "")
+         + f" weights cached under {cache}")
     return EXIT_OK
 
 
@@ -177,8 +198,7 @@ def cmd_voice_check(args) -> int:
     backend = tts.resolve_backend(args.tts)
     ref = Path(args.ref) if args.ref else None
     if ref is not None and not ref.is_file():
-        _err(f"reference voice not found: {ref}")
-        return EXIT_BAD_INPUT
+        return _bad_input(paths, "voice-check", f"reference voice not found: {ref}")
     t0 = time.time()
     wav, sr = tts.synthesize(VOICE_CHECK_TEXT, ref, backend, online=args.online)
     p = tts.write_wav(paths.audio / "voice_check.wav", wav, sr)
@@ -259,8 +279,7 @@ def cmd_synth(args) -> int:
     backend = tts.resolve_backend(args.tts)
     ref = Path(args.ref) if args.ref else None
     if ref is not None and not ref.is_file():
-        _err(f"reference voice not found: {ref}")
-        return EXIT_BAD_INPUT
+        return _bad_input(paths, "synth", f"reference voice not found: {ref}")
     t0 = time.time()
     durations = tts.synth_all(paths.out, ref, backend, online=args.online)
     total = round(sum(durations.values()), 1)
@@ -279,10 +298,11 @@ def cmd_record(args) -> int:
     m = _mod("drive").record(scen, paths.out, args.capture, args.headless, durations)
     _log(paths, "record", m)
     steps = m.get("steps", [])
-    failed = [s["id"] for s in steps if s.get("status") == "FAIL"]
-    _say(f"record: {'FAIL' if failed else 'ok'} capture={args.capture} "
-         f"{_step_summary(steps)} end={m.get('end_t', 0):.1f}s -> {paths.raw / 'capture.mp4'}")
-    return EXIT_FAIL if failed else EXIT_OK
+    failure = _record_failure(m)
+    _say(f"record: {'FAIL' if failure else 'ok'} capture={args.capture} "
+         f"{_step_summary(steps)} end={m.get('end_t', 0):.1f}s -> {paths.raw / 'capture.mp4'}"
+         + (f" ({failure})" if failure else ""))
+    return EXIT_FAIL if failure else EXIT_OK
 
 
 def cmd_edit(args) -> int:
@@ -327,7 +347,7 @@ def cmd_run(args) -> int:
     try:
         t0 = time.time()
         env_rep = env.detect(args.base_url if source == "llm" else None,
-                             args.model if source == "llm" else None)
+                             args.model if source == "llm" else None, timeout=args.timeout)
         _log(paths, "doctor", env_rep)
         timings[stage] = round(time.time() - t0, 1)
         _say(f"[doctor] ffmpeg={'ok' if env_rep['ffmpeg'] else 'MISSING'} "
@@ -354,7 +374,7 @@ def cmd_run(args) -> int:
         if source == "llm":
             if not args.base_url or not args.model:
                 raise PipelineError("--narration llm needs --base-url and --model")
-            narr, source, note = narration.from_llm(scen, args.base_url, args.model)
+            narr, source, note = narration.from_llm(scen, args.base_url, args.model, timeout=args.timeout)
         else:
             narr = narration.template(scen)
         errors = narration.validate(narr, scen)
@@ -383,11 +403,11 @@ def cmd_run(args) -> int:
         markers = _mod("drive").record(scen, paths.out, args.capture, args.headless, durations)
         _log(paths, "record", markers)
         timings[stage] = round(time.time() - t0, 1)
-        rec_failed = [s["id"] for s in markers.get("steps", []) if s.get("status") == "FAIL"]
+        rec_failure = _record_failure(markers)
         _say(f"[record] capture={args.capture} {_step_summary(markers.get('steps', []))} "
-             f"end={markers.get('end_t', 0):.1f}s")
-        if rec_failed:
-            done("FAIL", f"steps failed during recording: {', '.join(rec_failed)}")
+             f"end={markers.get('end_t', 0):.1f}s" + (f" ({rec_failure})" if rec_failure else ""))
+        if rec_failure:
+            done("FAIL", rec_failure)
             return EXIT_FAIL
 
         stage = "edit"
@@ -435,15 +455,21 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"output directory (default: {DEFAULT_OUT})")
 
     def llm_args(sp, required=False):
-        sp.add_argument("--base-url", required=required, default=os.environ.get("DEMO_SMOKE_BASE_URL"),
-                        help="OpenAI-compatible base URL, e.g. http://localhost:11434/v1")
-        sp.add_argument("--model", required=required, default=os.environ.get("DEMO_SMOKE_MODEL"),
-                        help="model name, e.g. qwen2.5:7b")
+        # DEMO_SMOKE_BASE_URL / DEMO_SMOKE_MODEL satisfy a required flag (argparse ignores
+        # defaults on required options, so only require when the env var is unset).
+        base_default = os.environ.get("DEMO_SMOKE_BASE_URL") or None
+        model_default = os.environ.get("DEMO_SMOKE_MODEL") or None
+        sp.add_argument("--base-url", required=required and base_default is None, default=base_default,
+                        help="OpenAI-compatible base URL, e.g. http://localhost:11434/v1 "
+                             "(env: DEMO_SMOKE_BASE_URL)")
+        sp.add_argument("--model", required=required and model_default is None, default=model_default,
+                        help="model name, e.g. qwen3-coder:30b (env: DEMO_SMOKE_MODEL)")
         sp.add_argument("--timeout", type=int, default=180, help="LLM request timeout (s)")
 
     def tts_args(sp):
         sp.add_argument("--tts", choices=TTS_CHOICES, default="auto", help="TTS backend")
-        sp.add_argument("--ref", default=None, help="reference voice WAV (5-15 s of clean speech)")
+        sp.add_argument("--ref", default=None,
+                        help="reference voice WAV (30-90 s of clean single-speaker speech)")
         sp.add_argument("--online", action="store_true",
                         help="allow HF downloads (default: HF_HUB_OFFLINE=1)")
 
@@ -458,7 +484,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_check_model)
 
     sp = sub.add_parser("prefetch", help="download Chatterbox weights (online)")
-    sp.add_argument("--tts", choices=("turbo", "nano", "classic"), default="turbo")
+    sp.add_argument("--tts", choices=("auto", "turbo", "nano", "classic"), default="auto",
+                    help="which weights to cache; auto = what `run --tts auto` picks on this machine")
     out_arg(sp)
     sp.set_defaults(fn=cmd_prefetch)
 
@@ -534,6 +561,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return int(args.fn(args))
     except ScenarioError as e:
+        _log_failure(args, str(e), EXIT_BAD_INPUT)
         _err(str(e))
         return EXIT_BAD_INPUT
     except KeyboardInterrupt:
@@ -542,5 +570,18 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:  # expected tooling failures: one line, no traceback
         if os.environ.get("DEMO_SMOKE_DEBUG"):
             raise
-        _err(f"{args.cmd}: {e}")
+        msg = f"{args.cmd}: {e}"
+        _log_failure(args, msg, EXIT_ERROR)
+        _err(msg)
         return EXIT_ERROR
+
+
+def _log_failure(args, msg: str, code: int) -> None:
+    """``<out>/logs/<cmd>.json`` = {"error", "exit_code"} on exit 3/4 (``run`` writes its own)."""
+    out = getattr(args, "out", None)
+    if not out or getattr(args, "cmd", "") == "run":
+        return
+    try:
+        _log(Paths(out), args.cmd, {"error": msg, "exit_code": code})
+    except OSError:
+        pass

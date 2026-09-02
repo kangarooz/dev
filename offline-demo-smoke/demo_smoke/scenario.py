@@ -16,6 +16,8 @@ ACTIONS = ("goto", "click", "fill", "type", "press", "upload", "hover", "scroll"
            "wait", "wait_for", "screenshot")
 EXPECTS = ("text", "selector", "url_contains", "not_text")
 LOGIN_TYPES = ("none", "form", "basic")
+TOP_LEVEL_KEYS = ("name", "slug", "app_url", "viewport", "login", "max_length_seconds",
+                  "intro", "outro", "steps")
 DEFAULT_VIEWPORT = {"width": 1920, "height": 1080}
 DEFAULT_MAX_SECONDS = 90
 DEFAULT_TIMEOUT_S = 60
@@ -109,7 +111,8 @@ def _validate_expect(e, where: str, errors: list[str]) -> None:
     if not _is_str(e[kind]):
         errors.append(f"{where}.{kind} must be a non-empty string")
     allowed = {"selector": {"contains": lambda v: isinstance(v, str),
-                            "count_min": lambda v: _is_num(v) and v >= 0}}.get(kind, {})
+                            "count_min": lambda v: isinstance(v, int) and not isinstance(v, bool)
+                            and v >= 0}}.get(kind, {})
     for key in e:
         if key != kind and key not in allowed:
             errors.append(f"{where} has unknown key '{key}' for expect '{kind}'")
@@ -145,6 +148,10 @@ def validate(data: dict) -> list[str]:
     errors: list[str] = []
     if not isinstance(data, dict):
         return ["scenario must be a JSON object"]
+    for key in data:
+        # "$schema" is the editor hint; "_dir"/"_path" are added by load() (see cli logs/scenario.json)
+        if key not in TOP_LEVEL_KEYS and key != "$schema" and not str(key).startswith("_"):
+            errors.append(f"unknown top-level key '{key}' (allowed: {', '.join(TOP_LEVEL_KEYS)})")
     if not _is_str(data.get("name")):
         errors.append("name must be a non-empty string")
     if "slug" in data and not (isinstance(data["slug"], str)

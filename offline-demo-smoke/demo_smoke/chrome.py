@@ -26,8 +26,11 @@ log = logging.getLogger(__name__)
 DEFAULT_VIEWPORT = {"width": 1920, "height": 1080}
 STARTUP_TIMEOUT_S = 20.0
 TERMINATE_GRACE_S = 5.0
-# Room for the tab strip + toolbar when the window is not headless.
+# Room for the tab strip + toolbar when the window is not headless (initial guess;
+# ChromeSession measures the real insets after launch and resizes the window).
 HEADED_CHROME_UI_HEIGHT = 88
+# Blank page a fresh session is parked on (see ChromeSession._attach).
+SETTLE_URL = "data:text/html,<title>demo-smoke</title>"
 
 
 class ChromeError(RuntimeError):
@@ -117,6 +120,9 @@ def chrome_args(chrome: str, port: int, profile_dir: Path, viewport: dict, headl
         "--disable-renderer-backgrounding",
         "--disable-backgrounding-occluded-windows",
         "--hide-crash-restore-bubble",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-sync",
     ]
     if headless:
         args.append("--headless=new")
@@ -128,13 +134,16 @@ def chrome_args(chrome: str, port: int, profile_dir: Path, viewport: dict, headl
 
 def _wait_for_devtools(port: int, proc: subprocess.Popen, log_path: Path, timeout: float) -> dict:
     url = f"http://127.0.0.1:{port}/json/version"
+    # Never route the loopback DevTools probe through HTTP_PROXY (urllib honours the
+    # proxy env vars for every host that is not listed in no_proxy).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + timeout
     last_err = ""
     while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise ChromeError(f"Chrome exited with code {proc.returncode} during startup ({_log_tail(log_path)})")
         try:
-            with urllib.request.urlopen(url, timeout=1.0) as resp:
+            with opener.open(url, timeout=1.0) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             last_err = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
@@ -156,8 +165,11 @@ class ChromeSession:
     """A running Chrome process plus the Playwright objects attached to it.
 
     Attributes: ``page``, ``context``, ``browser``, ``cdp`` (page-level CDP
-    session), ``window_bounds`` ({x, y, width, height}), ``port``,
-    ``chrome_path``, ``profile_dir``, ``viewport``, ``headless``, ``version``.
+    session), ``window_bounds`` ({x, y, width, height}, in DIPs), ``ui_insets``
+    ({x, y}: browser UI between the window origin and the page area, DIPs),
+    ``device_scale_factor`` (physical pixels per DIP, e.g. 2.0 on Retina / 125%
+    Windows scaling = 1.25), ``port``, ``chrome_path``, ``profile_dir``,
+    ``viewport``, ``headless``, ``version``.
     Use as a context manager or call ``close()``.
     """
 
@@ -178,6 +190,10 @@ class ChromeSession:
         self.page = None
         self.cdp = None
         self.window_bounds: dict = {"x": 0, "y": 0, "width": int(viewport["width"]), "height": int(viewport["height"])}
+        # Browser UI (tab strip/toolbar, or the area --headless=new reserves for it)
+        # between the window size and the page area, measured after launch.
+        self.ui_insets: dict = {"x": 0, "y": 0 if headless else HEADED_CHROME_UI_HEIGHT}
+        self.device_scale_factor: float = 1.0
         self._closed = False
 
     @property
@@ -193,9 +209,118 @@ class ChromeSession:
         self.context = contexts[0] if contexts else self.browser.new_context()
         pages = self.context.pages
         self.page = pages[0] if pages else self.context.new_page()
-        self.page.set_viewport_size({"width": int(self.viewport["width"]), "height": int(self.viewport["height"])})
         self.cdp = self.context.new_cdp_session(self.page)
+        try:
+            # Headless Chrome only finishes laying out its (invisible) window UI on the
+            # first navigation away from the initial about:blank; the page area moves
+            # by ~50 px then.  Leave about:blank first so the fit below measures the
+            # settled area instead of a value that changes under the first capture.
+            self.page.goto(SETTLE_URL, wait_until="load", timeout=STARTUP_TIMEOUT_S * 1000)
+        except Exception:
+            log.debug("settle navigation failed", exc_info=True)
+        self.device_scale_factor = self._read_scale_factor()
+        self._fit_window_to_viewport()
+        self.page.set_viewport_size({"width": int(self.viewport["width"]), "height": int(self.viewport["height"])})
         self.window_bounds = self._read_window_bounds()
+
+    def _read_scale_factor(self) -> float:
+        """``window.devicePixelRatio`` before any viewport emulation: the OS backing
+        scale the screen grabbers see (Retina 2.0, Windows 125% = 1.25)."""
+        try:
+            dpr = float(self.page.evaluate("window.devicePixelRatio") or 1.0)
+            return dpr if dpr > 0 else 1.0
+        except Exception:
+            log.debug("could not read devicePixelRatio", exc_info=True)
+            return 1.0
+
+    def _inner_size(self) -> tuple[int, int]:
+        w, h = self.page.evaluate("[window.innerWidth, window.innerHeight]")
+        return int(w), int(h)
+
+    def _probe_surface_size(self, max_ms: int = 1500) -> tuple[int, int] | None:
+        """The real page area as the screencast sees it (``deviceWidth``/``deviceHeight``
+        of a throwaway screencast's frames).  Producing frames is also what makes
+        headless Chrome finish laying out its invisible UI, so the value settles here
+        rather than moving under the first real capture.  ``None`` if no frame came."""
+        cdp = self.cdp
+        sizes: list[tuple[int, int]] = []
+
+        def on_frame(event: dict) -> None:
+            meta = event.get("metadata") or {}
+            if meta.get("deviceWidth") and meta.get("deviceHeight"):
+                sizes.append((int(meta["deviceWidth"]), int(meta["deviceHeight"])))
+            try:
+                cdp.send("Page.screencastFrameAck", {"sessionId": event["sessionId"]})
+            except Exception:
+                log.debug("ignored error", exc_info=True)
+
+        cdp.on("Page.screencastFrame", on_frame)
+        try:
+            cdp.send("Page.startScreencast", {"format": "jpeg", "quality": 30, "maxWidth": 8192, "maxHeight": 8192,
+                                              "everyNthFrame": 1})
+            waited = 0
+            while waited < max_ms:
+                # repaint so frames keep coming (about:blank is otherwise static)
+                self.page.evaluate("on => { document.documentElement.style.backgroundColor = on ? '#fffffe' : ''; }",
+                                   (waited // 100) % 2 == 0)
+                self.page.wait_for_timeout(100)
+                waited += 100
+                if len(sizes) >= 3 and sizes[-1] == sizes[-2] == sizes[-3]:
+                    break
+        finally:
+            try:
+                cdp.send("Page.stopScreencast")
+            except Exception:
+                log.debug("ignored error", exc_info=True)
+            try:
+                self.page.wait_for_timeout(50)
+                cdp.remove_listener("Page.screencastFrame", on_frame)
+                self.page.evaluate("document.documentElement.style.backgroundColor = ''")
+            except Exception:
+                log.debug("ignored error", exc_info=True)
+        return sizes[-1] if sizes else None
+
+    def _fit_window_to_viewport(self, rounds: int = 4) -> None:
+        """Resize the window until the real page area equals the viewport.
+
+        ``--window-size`` is the outer window: headed Chrome spends part of it on
+        the tab strip and toolbar, and ``--headless=new`` reserves ~140 px for the
+        same UI even though nothing is drawn.  Playwright's ``set_viewport_size``
+        only *emulates* the viewport for layout; the CDP screencast (and an OS
+        screen grab) capture the real page area, so a 1280x720 headless window
+        yielded 1280x580 frames.  Measure the area as the screencast reports it,
+        fix the window bounds, and repeat until they agree (the insets settle
+        over the first frames).  Never raises; a failure leaves the window as is.
+        """
+        want_w, want_h = int(self.viewport["width"]), int(self.viewport["height"])
+        bcdp = None
+        try:
+            for _ in range(rounds):
+                real = self._probe_surface_size() or self._inner_size()
+                dx, dy = want_w - real[0], want_h - real[1]
+                if not dx and not dy:
+                    break
+                if bcdp is None:
+                    target_id = self.cdp.send("Target.getTargetInfo")["targetInfo"]["targetId"]
+                    bcdp = self.browser.new_browser_cdp_session()
+                win = bcdp.send("Browser.getWindowForTarget", {"targetId": target_id})
+                bounds = win["bounds"]
+                bcdp.send("Browser.setWindowBounds", {
+                    "windowId": win["windowId"],
+                    "bounds": {"width": int(bounds["width"]) + dx, "height": int(bounds["height"]) + dy},
+                })
+                self.ui_insets = {"x": self.ui_insets["x"] + dx, "y": self.ui_insets["y"] + dy}
+                self.page.wait_for_timeout(200)
+            else:
+                log.debug("window did not settle on the %sx%s viewport after %s rounds", want_w, want_h, rounds)
+        except Exception:
+            log.debug("could not fit the window to the viewport", exc_info=True)
+        finally:
+            if bcdp is not None:
+                try:
+                    bcdp.detach()
+                except Exception:
+                    log.debug("ignored error", exc_info=True)
 
     def _read_window_bounds(self) -> dict:
         fallback = dict(self.window_bounds)

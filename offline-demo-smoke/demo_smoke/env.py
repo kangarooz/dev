@@ -179,18 +179,71 @@ def chatterbox_importable() -> bool:
         return False
 
 
+def chatterbox_nano_supported() -> bool | None:
+    """Does the installed chatterbox-tts ship the Nano model?
+
+    ``None`` when chatterbox is not importable.  The PyPI releases up to 0.1.7
+    have no Nano (``ChatterboxTurboTTS.from_pretrained(device)`` only); the git
+    master adds ``nano=True``.  Detected by scanning the module source so that
+    doctor stays cheap (importing chatterbox pulls in torch + transformers).
+    """
+    try:
+        spec = importlib.util.find_spec("chatterbox.tts_turbo")
+    except (ImportError, ValueError, AttributeError):
+        return None
+    if spec is None or not spec.origin:
+        return None
+    try:
+        src = Path(spec.origin).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return bool(re.search(r"\bnano\b", src, re.IGNORECASE))
+
+
 def hf_cache_dir() -> str:
+    """The Hugging Face hub cache, resolved like huggingface_hub does:
+    ``HF_HUB_CACHE`` -> ``HUGGINGFACE_HUB_CACHE`` -> ``$HF_HOME/hub`` -> ``~/.cache/huggingface/hub``."""
+    for key in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
+        val = os.environ.get(key)
+        if val:
+            return str(Path(val).expanduser())
     home = os.environ.get("HF_HOME")
     if home:
-        return str(Path(home) / "hub")
+        return str(Path(home).expanduser() / "hub")
     return str(Path.home() / ".cache" / "huggingface" / "hub")
+
+
+# Hugging Face repos each Chatterbox backend downloads (see chatterbox/tts*.py).
+HF_REPOS = {
+    "turbo": "ResembleAI/chatterbox-turbo",
+    "nano": "ResembleAI/chatterbox-nano",
+    "classic": "ResembleAI/chatterbox",
+}
+
+
+def hf_weights_present(cache: str | None = None) -> dict:
+    """{backend: bool} - is a snapshot of that backend's repo in the HF cache?
+
+    huggingface_hub stores ``models--<org>--<name>/refs/main`` next to the
+    ``snapshots/`` directory once a revision has been downloaded.
+    """
+    root = Path(cache or hf_cache_dir())
+    found = {}
+    for backend, repo in HF_REPOS.items():
+        d = root / ("models--" + repo.replace("/", "--"))
+        found[backend] = (d / "refs" / "main").is_file() and any((d / "snapshots").glob("*")) \
+            if d.is_dir() else False
+    return found
 
 
 # --------------------------------------------------------------------------- doctor
 
 
-def detect(base_url: str | None = None, model: str | None = None) -> dict:
-    """Doctor report.  Never raises: missing components are None/False + a hint."""
+def detect(base_url: str | None = None, model: str | None = None,
+           timeout: int | None = None) -> dict:
+    """Doctor report.  Never raises: missing components are None/False + a hint.
+
+    ``timeout`` (seconds) is forwarded to the LLM tool-call probe."""
     hints: list[str] = []
     rep: dict = {
         "os": f"{platform.system()} {platform.release()} ({platform.machine()})",
@@ -225,17 +278,40 @@ def detect(base_url: str | None = None, model: str | None = None) -> dict:
     except OSError:
         rep["chrome"] = None
     if not rep["chrome"]:
-        hints.append(
-            "Chrome/Chromium not found: install Google Chrome or run "
-            "`playwright install chromium`, or set DEMO_SMOKE_CHROME=/path/to/chrome"
-        )
+        env_chrome = os.environ.get("DEMO_SMOKE_CHROME")
+        if env_chrome:
+            hints.append(f"DEMO_SMOKE_CHROME points to a missing file: {env_chrome}")
+        else:
+            hints.append(
+                "Chrome/Chromium not found: install Google Chrome/Chromium, "
+                "or set DEMO_SMOKE_CHROME=/path/to/chrome"
+            )
     rep["torch_device"] = torch_device()
     rep["chatterbox"] = chatterbox_importable()
+    rep["chatterbox_nano"] = chatterbox_nano_supported() if rep["chatterbox"] else None
+    rep["hf_weights"] = hf_weights_present(rep["hf_cache"])
+    rep["tts_auto"] = None
+    rep["tts_ready"] = False
     if rep["torch_device"] == "none" or not rep["chatterbox"]:
         hints.append(
             "Voice cloning unavailable (torch/chatterbox missing): "
             "`pip install -r requirements-tts.txt`; `--tts tone` works without them"
         )
+    else:
+        try:
+            from . import tts as _tts
+
+            rep["tts_auto"] = _tts.resolve_backend("auto")
+        except Exception as e:  # noqa: BLE001 - doctor reports, never crashes
+            hints.append(f"could not resolve --tts auto: {e}")
+        if rep["tts_auto"]:
+            rep["tts_ready"] = bool(rep["hf_weights"].get(rep["tts_auto"]))
+            if not rep["tts_ready"]:
+                hints.append(
+                    f"no Chatterbox '{rep['tts_auto']}' weights under {rep['hf_cache']}: run "
+                    f"`python -m demo_smoke prefetch --tts {rep['tts_auto']}` while online "
+                    "(or use --tts tone)"
+                )
     if base_url:
         llm: dict = {"base_url": base_url, "model": model, "reachable": False, "tool_call": None}
         try:
@@ -243,9 +319,13 @@ def detect(base_url: str | None = None, model: str | None = None) -> dict:
 
             llm["reachable"] = _llm.reachable(base_url)
             if not llm["reachable"]:
-                hints.append(f"LLM endpoint not reachable at {base_url} (is ollama/llama.cpp running?)")
+                hint = f"LLM endpoint not reachable at {base_url} (is ollama/llama.cpp running?"
+                if any(os.environ.get(k) for k in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy")):
+                    hint += "; a proxy is set: loopback hosts bypass it, others need `no_proxy`"
+                hints.append(hint + ")")
             elif model:
-                llm["tool_call"] = _llm.probe_tool_call(base_url, model)
+                llm["tool_call"] = (_llm.probe_tool_call(base_url, model, timeout=timeout)
+                                    if timeout else _llm.probe_tool_call(base_url, model))
                 if not llm["tool_call"]["pass"]:
                     hints.append(
                         f"model {model} did not return a tool call; pick a tool-capable model "

@@ -145,9 +145,74 @@ def test_detect_never_crashes(monkeypatch, tmp_path, unreachable_url):
     assert rep["ffmpeg"] is None and rep["chrome"] is None
     assert rep["llm"]["reachable"] is False and rep["llm"]["tool_call"] is None
     assert any("DEMO_SMOKE_FFMPEG" in h for h in rep["hints"])
-    assert any("Chrome" in h for h in rep["hints"])
+    assert any("DEMO_SMOKE_CHROME points to a missing file" in h for h in rep["hints"])
     assert any("not reachable" in h for h in rep["hints"])
+    assert set(rep["hf_weights"]) == {"turbo", "nano", "classic"}
+    assert rep["tts_ready"] is False
     json.dumps(rep)  # serializable
+    monkeypatch.delenv("DEMO_SMOKE_CHROME")
+    monkeypatch.setattr(env, "find_chrome", lambda: None)
+    rep = env.detect()
+    assert any(h.startswith("Chrome/Chromium not found") and "playwright install" not in h for h in rep["hints"])
+
+
+def test_hf_cache_dir_precedence(monkeypatch, tmp_path):
+    for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"):
+        monkeypatch.delenv(k, raising=False)
+    assert env.hf_cache_dir() == str(Path.home() / ".cache" / "huggingface" / "hub")
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
+    assert env.hf_cache_dir() == str(tmp_path / "hf" / "hub")
+    monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "legacy"))
+    assert env.hf_cache_dir() == str(tmp_path / "legacy")
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    assert env.hf_cache_dir() == str(tmp_path / "hub")
+
+
+def test_hf_weights_present(tmp_path):
+    cache = tmp_path / "hub"
+    assert env.hf_weights_present(str(cache)) == {"turbo": False, "nano": False, "classic": False}
+    repo = cache / "models--ResembleAI--chatterbox-turbo"
+    (repo / "refs").mkdir(parents=True)
+    (repo / "refs" / "main").write_text("abc")
+    assert env.hf_weights_present(str(cache))["turbo"] is False      # ref without a snapshot
+    (repo / "snapshots" / "abc").mkdir(parents=True)
+    assert env.hf_weights_present(str(cache)) == {"turbo": True, "nano": False, "classic": False}
+
+
+def test_chatterbox_nano_supported_scans_source(tmp_path, monkeypatch):
+    import importlib
+    import sys
+
+    site = tmp_path / "site"
+    (site / "chatterbox").mkdir(parents=True)
+    (site / "chatterbox" / "__init__.py").write_text("")
+    turbo = site / "chatterbox" / "tts_turbo.py"
+    turbo.write_text("class ChatterboxTurboTTS:\n    @classmethod\n    def from_pretrained(cls, device):\n        pass\n")
+    for name in [m for m in sys.modules if m == "chatterbox" or m.startswith("chatterbox.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(site))
+    importlib.invalidate_caches()
+    assert env.chatterbox_importable() is True
+    assert env.chatterbox_nano_supported() is False                  # PyPI 0.1.7 shape
+    turbo.write_text("NANO_REPO_ID = 'ResembleAI/chatterbox-nano'\nclass ChatterboxTurboTTS:\n"
+                     "    @classmethod\n    def from_pretrained(cls, device, nano=False):\n        pass\n")
+    assert env.chatterbox_nano_supported() is True                   # git master shape
+
+
+def test_detect_reports_tts_auto_and_readiness(tmp_path, monkeypatch):
+    monkeypatch.setattr(env, "torch_device", lambda: "cpu")
+    monkeypatch.setattr(env, "chatterbox_importable", lambda: True)
+    monkeypatch.setattr(env, "chatterbox_nano_supported", lambda: False)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    rep = env.detect()
+    assert rep["tts_auto"] == "turbo" and rep["tts_ready"] is False
+    assert any("prefetch --tts turbo" in h for h in rep["hints"])
+    repo = tmp_path / "hub" / "models--ResembleAI--chatterbox-turbo"
+    (repo / "refs").mkdir(parents=True)
+    (repo / "refs" / "main").write_text("x")
+    (repo / "snapshots" / "x").mkdir(parents=True)
+    rep = env.detect()
+    assert rep["tts_ready"] is True and not any("prefetch" in h for h in rep["hints"])
 
 
 def test_detect_with_fake_llm(fake_llm):

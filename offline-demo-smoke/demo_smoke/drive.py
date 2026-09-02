@@ -112,43 +112,54 @@ def _wait_until(page, clock, target: float) -> None:
 
 
 class _Collector:
-    """Console errors + failed responses observed on a page."""
+    """Console errors + failed responses observed on a page.
+
+    Response bodies are only read for requests whose ``requestfinished`` event
+    fired: a body that the page never consumed (e.g. a discarded ``fetch``)
+    never finishes loading, and ``Response.text()`` would block forever.
+    """
 
     def __init__(self, page):
         self.page = page
         self.console_errors: list[str] = []
         self.failed_requests: list[dict] = []
+        self._finished: set = set()
 
     def _on_console(self, msg) -> None:
         try:
             if msg.type == "error":
                 self.console_errors.append(msg.text)
         except Exception:
-            log.debug("ignored error", exc_info=True)
+            log.debug("console handler failed", exc_info=True)
 
     def _on_pageerror(self, err) -> None:
-        self.console_errors.append(f"Uncaught {_one_line(err) if isinstance(err, BaseException) else str(err).splitlines()[0]}")
+        text = _one_line(err) if isinstance(err, BaseException) else (str(err).splitlines() or [""])[0]
+        self.console_errors.append(f"Uncaught {text}")
 
     def _on_response(self, resp) -> None:
-        # No round-trips here: a sync API call inside an event handler never returns
-        # (the reply is queued behind this very handler). Bodies are read in since().
+        # No round-trips here: sync API calls inside an event handler cannot complete.
         try:
             if resp.status >= 400:
                 self.failed_requests.append({"url": resp.url, "status": resp.status, "body_excerpt": None, "_resp": resp})
         except Exception:
             log.debug("response handler failed", exc_info=True)
 
+    def _on_finished(self, request) -> None:
+        self._finished.add(id(request))
+
     def attach(self) -> None:
         self.page.on("console", self._on_console)
         self.page.on("pageerror", self._on_pageerror)
         self.page.on("response", self._on_response)
+        self.page.on("requestfinished", self._on_finished)
 
     def detach(self) -> None:
-        for name, fn in (("console", self._on_console), ("pageerror", self._on_pageerror), ("response", self._on_response)):
+        for name, fn in (("console", self._on_console), ("pageerror", self._on_pageerror),
+                         ("response", self._on_response), ("requestfinished", self._on_finished)):
             try:
                 self.page.remove_listener(name, fn)
             except Exception:
-                log.debug("ignored error", exc_info=True)
+                log.debug("remove_listener failed", exc_info=True)
 
     def mark(self) -> tuple[int, int]:
         return len(self.console_errors), len(self.failed_requests)
@@ -159,19 +170,20 @@ class _Collector:
         for item in self.failed_requests[mark[1]:]:
             resp = item.pop("_resp", None)
             if item.get("body_excerpt") is None:
-                item["body_excerpt"] = _body_excerpt(resp)
+                item["body_excerpt"] = self._excerpt(resp)
             failed.append(dict(item))
         return list(self.console_errors[mark[0]:]), failed
 
-
-def _body_excerpt(resp, limit: int = 200) -> str:
-    if resp is None:
-        return ""
-    try:
-        return " ".join(resp.text()[:limit].split())
-    except Exception:
-        log.debug("could not read failed response body", exc_info=True)
-        return ""
+    def _excerpt(self, resp, limit: int = 200) -> str:
+        if resp is None:
+            return ""
+        try:
+            if id(resp.request) not in self._finished:
+                return ""
+            return " ".join(resp.text()[:limit].split())
+        except Exception:
+            log.debug("could not read failed response body", exc_info=True)
+            return ""
 
 
 # --------------------------------------------------------------------------- mouse / actions
@@ -302,12 +314,14 @@ def check_expectation(page, exp: dict) -> tuple[bool, str]:
     if "selector" in exp:
         known = True
         sel = str(exp["selector"])
-        loc = page.locator(sel)
+        # Only visible elements count (schema: "at least one visible element matches"),
+        # so a pre-rendered hidden placeholder cannot satisfy the expectation.
+        loc = page.locator(sel).locator("visible=true")
         count = loc.count()
         need = int(exp.get("count_min", 1))
         hit = count >= need
         ok = ok and hit
-        obs = f"selector {sel}: {count} element(s)"
+        obs = f"selector {sel}: {count} visible element(s)"
         if "contains" in exp:
             texts = loc.all_inner_texts() if count else []
             want = str(exp["contains"])
@@ -625,6 +639,7 @@ def record(scenario: dict, out: Path, capture: str, headless: bool, durations: d
     durations = durations or {}
     steps_cfg = scenario.get("steps") or []
     session = _launch(scenario, out, headless)
+    cap = None
     try:
         _install_cursor(session)
         page = session.page
@@ -670,6 +685,13 @@ def record(scenario: dict, out: Path, capture: str, headless: bool, durations: d
         except Exception as exc:
             raise DriveError(f"capture failed: {_one_line(exc)}") from exc
     finally:
+        # On any error stop the grabber/screencast first (ffmpeg would otherwise keep
+        # recording the desktop with its log handle open), then close Chrome.
+        if cap is not None and not getattr(cap, "_stopped", True):
+            try:
+                cap.abort()
+            except Exception:
+                log.debug("ignored error", exc_info=True)
         session.close()
 
     markers = _build_markers(cap.capture_start_epoch or time.time(), steps, outro_t, end_t)
@@ -677,13 +699,16 @@ def record(scenario: dict, out: Path, capture: str, headless: bool, durations: d
     markers["capture_backend"] = capture
     markers["capture_seconds"] = round(cap.now(), 3)
     markers["viewport"] = dict(session.viewport)
+    markers["capture_bounds"] = dict(getattr(cap, "bounds", None) or {})   # screen backend: page area (DIPs)
+    markers["ui_insets"] = dict(getattr(session, "ui_insets", None) or {})
+    markers["device_scale_factor"] = float(getattr(session, "device_scale_factor", 1.0) or 1.0)
     markers["note"] = getattr(cap, "note", "") or ""
     markers["verdict"] = "PASS" if steps and all(s["status"] == "PASS" for s in steps) else "FAIL"
     if login_error:
         markers["error"] = login_error
-    _save_markers(markers, out, paths)
     if not steps_cfg:
         markers["note"] = (markers["note"] + "; " if markers["note"] else "") + "scenario has no steps"
+    _save_markers(markers, out, paths)
     return markers
 
 

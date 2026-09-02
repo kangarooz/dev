@@ -160,6 +160,26 @@ def test_dryrun_basic_auth(tmp_path, monkeypatch):
     assert result["verdict"] == "PASS", [s["error"] for s in result["steps"]]
 
 
+def test_selector_expectation_counts_visible_elements_only(tmp_path):
+    """schema.json: 'At least one visible element matches' - a hidden placeholder must not pass."""
+    _need_chrome()
+    with chrome.launch(tmp_path, {"width": 640, "height": 480}, headless=True) as session:
+        page = session.page
+        page.set_content('<div class="answer" style="display:none">inspect hidden</div>'
+                         '<div class="chip">one</div><div class="chip" hidden>two</div>')
+        ok, obs = drive.check_expectation(page, {"selector": ".answer"})
+        assert ok is False and "0 visible" in obs
+        ok, _ = drive.check_expectation(page, {"selector": ".answer", "contains": "inspect"})
+        assert ok is False
+        ok, obs = drive.check_expectation(page, {"selector": ".chip", "count_min": 1})
+        assert ok is True and "1 visible" in obs
+        ok, _ = drive.check_expectation(page, {"selector": ".chip", "count_min": 2})
+        assert ok is False
+        page.set_content('<div class="answer">Ladders must be inspected</div>')
+        ok, _ = drive.check_expectation(page, {"selector": ".answer", "contains": "inspect"})
+        assert ok is True
+
+
 def test_dryrun_launch_failure_is_drive_error(tmp_path, monkeypatch):
     monkeypatch.setenv("DEMO_SMOKE_CHROME", str(tmp_path / "no-such-chrome"))
     with pytest.raises(drive.DriveError) as excinfo:

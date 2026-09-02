@@ -1,1 +1,24 @@
+# pipeline outputs
 demo-output/
+/out/
+/out-*/
+/tmp-*/
+chrome-profile/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv*/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# generated media and test scratch (never commit recordings)
+*.mp4
+*.mkv
+*.wav
+raw/frames/
+tests/**/out/
+tests/**/tmp/

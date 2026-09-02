@@ -18,14 +18,22 @@ offline-demo-smoke/
   opencode.json              local providers (ollama default; llama.cpp, lmstudio), permissions, agent, commands
   .opencode/agents/demo-smoke.md
   .opencode/commands/{setup,smoke,narrate,voice-check}.md
+  .ignore                    re-includes demo-output/ for ripgrep/OpenCode (gitignore hides it)
   requirements.txt           playwright, numpy, soundfile, imageio-ffmpeg
-  requirements-tts.txt       chatterbox-tts (+ torch/torchaudio, see README for index URLs)
+  requirements-tts.txt       chatterbox-tts + torch/torchaudio 2.6.0 (see README for index URLs)
+  requirements-dev.txt       pytest, ruff
   scripts/setup.sh, scripts/setup.ps1
-  scenarios/schema.json, scenarios/example-chat-with-manuals.json
+  scenarios/schema.json, scenarios/example-chat-with-manuals.json, scenarios/fixtures/osha-1910.pdf
   demo_smoke/                python package (see modules)
   tests/                     pytest; tests/fixtures/app/ is a static mock app
   demo-output/               default OUTPUT_DIR (gitignored)
 ```
+
+Contract corrections (review round 1): `auto` TTS no longer assumes Nano on
+CPU (the PyPI chatterbox-tts has none); `record` fails on a failed login;
+`selector` expectations count visible elements; `detect()` takes `timeout`;
+`run_steps()` takes `do_login`; capture classes expose `abort()`; the CLI
+table now lists every implemented flag.
 
 ## CLI contract  (`python -m demo_smoke <cmd> ...`)
 
@@ -33,26 +41,36 @@ Every command prints a one-line human summary to stdout, writes JSON to
 `<out>/logs/<cmd>.json`, and uses exit codes: 0 ok, 2 feature failed
 (smoke test FAIL), 3 pipeline/tooling error, 4 bad input.
 
+Every command accepts `--out DIR` (default `demo-output`); `python -m demo_smoke --version` exists.
+On exit 3 or 4 `<out>/logs/<cmd>.json` is `{"error": msg, "exit_code": N}` (except `run`, which
+writes its own `logs/run.json` + `report.md`/`result.json` for every outcome).
+
 | cmd | args | output |
 |---|---|---|
-| `doctor` | `[--base-url URL --model NAME]` | env report: os, python, ffmpeg path+version, chrome path, torch device (cuda/rocm/mps/cpu/none), chatterbox importable, ollama/OpenAI-compatible endpoint reachable, optional tool-call probe |
-| `check-model` | `--base-url URL --model NAME` | sends a chat completion with one tool (`get_step_status`) and checks the model returns a tool call; PASS/FAIL |
-| `prefetch` | `--tts turbo\|nano\|classic` | downloads Chatterbox weights into the HF cache (online step); prints cache dir |
-| `voice-check` | `--ref REF.wav --out DIR --tts auto\|turbo\|nano\|classic\|tone` | `audio/voice_check.wav` + stats (duration, peak dBFS, rms dBFS, silent, clipped) |
+| `doctor` | `[--base-url URL --model NAME] [--timeout N]` | env report: os, python, ffmpeg path+version, chrome path, torch device (cuda/rocm/mps/cpu/none), chatterbox importable + `chatterbox_nano`, HF cache path + `hf_weights` per backend, `tts_auto` (what `--tts auto` resolves to here) + `tts_ready`, ollama/OpenAI-compatible endpoint reachable, optional tool-call probe |
+| `check-model` | `--base-url URL --model NAME [--timeout N]` | sends a chat completion with one tool (`get_step_status`) and checks the model returns a tool call; PASS/FAIL |
+| `prefetch` | `--tts auto\|turbo\|nano\|classic` | downloads Chatterbox weights into the HF cache (online step; `auto` resolves like `run --tts auto` on this machine, logged as `backend`); prints cache dir |
+| `voice-check` | `--ref REF.wav --out DIR --tts auto\|turbo\|nano\|classic\|tone [--online]` | `audio/voice_check.wav` + stats (duration, peak dBFS, rms dBFS, silent, clipped) |
 | `dryrun` | `SCENARIO --out DIR [--headless]` | drives steps, `logs/step-NN-<id>.png`, `logs/smoke-results.md`, `logs/dryrun.json`; exit 2 on FAIL |
 | `narrate-template` | `SCENARIO --out DIR` | `audio/narration.json` from scenario `intro`/`outro`/step `narration` fields |
-| `narrate-llm` | `SCENARIO --out DIR --base-url URL --model NAME` | asks the local model for narration JSON, validates, falls back to template on any failure (and says so) |
-| `narrate-validate` | `--out DIR [--max-seconds N]` | validates `audio/narration.json` (ids match scenario, word budget); exit 4 on invalid |
-| `synth` | `--out DIR --ref REF.wav --tts ...` | `audio/seg-intro.wav`, `audio/seg-<id>.wav`, `audio/seg-outro.wav`, `audio/durations.json` |
-| `record` | `SCENARIO --out DIR --capture screencast\|screen [--headless]` | paced run: `raw/capture.mp4`, `logs/markers.json` |
-| `edit` | `--out DIR` | `final/<slug>.mp4` |
-| `verify` | `--out DIR` | `logs/verify.json`, `final/thumb-{10,50,90}.png`; exit 2 on failed checks |
-| `run` | `SCENARIO --out DIR [--tts ...] [--capture ...] [--narration template\|llm] [--ref REF] [--headless] [--base-url --model]` | whole pipeline in order: doctor → dryrun → narrate → synth → record → edit → verify → report; `report.md`, `result.json` |
+| `narrate-llm` | `SCENARIO --out DIR --base-url URL --model NAME [--timeout N]` | asks the local model for narration JSON, validates, falls back to template on any failure (and says so) |
+| `narrate-validate` | `[SCENARIO] --out DIR [--max-seconds N]` | validates `audio/narration.json` (ids match scenario, word budget); exit 4 on invalid; SCENARIO defaults to `logs/scenario.json` saved by an earlier command |
+| `synth` | `--out DIR --ref REF.wav --tts ... [--online]` | `audio/seg-intro.wav`, `audio/seg-<id>.wav`, `audio/seg-outro.wav`, `audio/durations.json` |
+| `record` | `SCENARIO --out DIR --capture screencast\|screen [--headless]` | paced run: `raw/capture.mp4`, `logs/markers.json`; exit 2 when login failed or any step did not PASS |
+| `edit` | `[SCENARIO] --out DIR` | `final/<slug>.mp4` |
+| `verify` | `[SCENARIO] --out DIR` | `logs/verify.json`, `final/thumb-{10,50,90}.png`; exit 2 on failed checks |
+| `run` | `SCENARIO --out DIR [--tts ...] [--capture ...] [--narration template\|llm] [--ref REF] [--online] [--headless] [--base-url --model --timeout N]` | whole pipeline in order: doctor → dryrun → narrate → synth → record → edit → verify → report; `report.md`, `result.json` |
 
 Env overrides: `DEMO_SMOKE_CHROME` (chrome binary), `DEMO_SMOKE_FFMPEG`
-(ffmpeg binary), `DEMO_SMOKE_FFPROBE`, `HF_HOME`. Offline: the kit sets
-`HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` before importing chatterbox
-unless `--online` is passed.
+(ffmpeg binary), `DEMO_SMOKE_FFPROBE`, `DEMO_SMOKE_BASE_URL` / `DEMO_SMOKE_MODEL`
+(defaults for `--base-url` / `--model`, also where the flag is otherwise required),
+`DEMO_SMOKE_API_KEY` or `OPENAI_API_KEY` (bearer token for the LLM endpoint),
+`DEMO_SMOKE_SCREEN_INDEX` (macOS display for `--capture screen`, default 0),
+`DEMO_SMOKE_DEBUG=1` (full tracebacks), `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` /
+`HF_HOME` (Hugging Face cache, resolved in that order like huggingface_hub).
+Offline: the kit sets `HF_HUB_OFFLINE=1` and `TRANSFORMERS_OFFLINE=1` before
+importing chatterbox unless `--online` is passed. Loopback HTTP (DevTools, local
+LLM) never goes through `HTTP_PROXY`.
 
 ffmpeg discovery order: `DEMO_SMOKE_FFMPEG` → `ffmpeg` on PATH →
 `imageio_ffmpeg.get_ffmpeg_exe()`. ffprobe: `DEMO_SMOKE_FFPROBE` → PATH →
@@ -63,13 +81,13 @@ names (`google-chrome`, `chrome`, `chromium`, `chromium-browser`) →
 
 ## Modules (package `demo_smoke`)
 
-- `env.py` — OS/ffmpeg/chrome/torch-device discovery, `Paths(out)` helper creating `raw/ audio/ clips/ final/ logs/`.
+- `env.py` — OS/ffmpeg/chrome/torch-device discovery, `chatterbox_nano_supported()`, HF cache dir + `hf_weights_present()` (snapshot per backend), `Paths(out)` helper creating `raw/ audio/ clips/ final/ logs/`.
 - `scenario.py` — load + validate scenario JSON (no third-party schema lib; hand-written validation with clear messages); resolve relative file paths against the scenario file's directory.
 - `chrome.py` — launch Chrome with `--remote-debugging-port` (random free port), fresh `--user-data-dir` under `<out>/chrome-profile`, `--window-size`, `--window-position=0,0`, `--no-first-run`, `--disable-features=Translate`, optional `--headless=new`; connect with Playwright `connect_over_cdp`; return (browser, context, page, cdp_session, window_bounds); clean shutdown.
-- `drive.py` — execute a scenario: login, then each step's `actions` then `expect`; smooth mouse moves (`page.mouse.move` with steps) so a cursor is visible; wait for real completion signals (selector/text/network idle) with per-step timeout; screenshots; returns `StepResult` list and per-step wait windows; `run_steps(page, scenario, out, pacing=None, on_step_start=None)` is shared by `dryrun` and `record`.
+- `drive.py` — execute a scenario: login, then each step's `actions` then `expect`; smooth mouse moves (`page.mouse.move` with steps) so a cursor is visible; wait for real completion signals (selector/text/network idle) with per-step timeout; screenshots; returns `StepResult` list and per-step wait windows; `run_steps(page, scenario, out, clock=None, pacer=None, screenshot_prefix="step", do_login=True)` is shared by `dryrun` and `record` (`record` logs in itself and passes `do_login=False`). `selector` expectations count visible elements only. `record` stops the capture on any error before closing Chrome.
 - `cursor.py` — JS injected via `Page.addScriptToEvaluateOnNewDocument`: draws a cursor div that follows `mousemove` and pulses on `mousedown` (pointer-events none, z-index max) so screencast/headless recordings show the pointer.
-- `capture.py` — two backends. `ScreencastCapture` (default): CDP `Page.startScreencast` (jpeg, q80, maxWidth/Height = viewport), acks every frame, writes `raw/frames/NNNNNN.jpg` + timestamps, and on stop assembles `raw/capture.mp4` with the ffmpeg concat demuxer (per-frame `duration`) at 30 fps CFR (`-vf fps=30 -c:v libx264 -crf 18 -pix_fmt yuv420p`). `ScreenCapture`: OS grabber of the Chrome window bounds (Windows `gdigrab -i desktop -offset_x -offset_y -video_size`, macOS `avfoundation -i "<screen-idx>:none"` + crop, Linux `x11grab -i :0.0+x,y -video_size`), 30 fps, `-c:v libx264 -preset ultrafast -crf 18`, stopped by writing `q` to stdin. Both expose `start() -> t0`, `now() -> seconds since t0`, `stop() -> path`.
-- `tts.py` — `synthesize(text, ref_wav, backend) -> (np.ndarray float32 mono, sr)`. Backends: `turbo` (`chatterbox.tts_turbo.ChatterboxTurboTTS.from_pretrained(device)`), `nano` (same with `nano=True`), `classic` (`chatterbox.tts.ChatterboxTTS`, uses `exaggeration`/`cfg_weight`), `tone` (synthetic: a quiet 220 Hz tone + amplitude envelope, length = words/2.5 s, for tests/dry runs; needs no ML deps), `auto` (cuda/rocm/mps → turbo, cpu → nano). Loads the model once per process. Writes WAV via soundfile at the model's `sr` (24000). Stats helper: duration, peak/rms dBFS, `silent` (rms < -50 dBFS), `clipped` (>0.5% samples at |1.0|).
+- `capture.py` — two backends. `ScreencastCapture` (default): CDP `Page.startScreencast` (jpeg, q80, maxWidth/Height = viewport), acks every frame, writes `raw/frames/NNNNNN.jpg` + timestamps, and on stop assembles `raw/capture.mp4` with the ffmpeg concat demuxer (per-frame `duration`) at 30 fps CFR (`-vf fps=30 -c:v libx264 -crf 18 -pix_fmt yuv420p`). `ScreenCapture`: OS grabber of the page area of the Chrome window (window bounds + measured `ui_insets`, viewport-sized, multiplied by `device_scale_factor` for the grab and scaled back to the viewport) (Windows `gdigrab -i desktop -offset_x -offset_y -video_size`, macOS `avfoundation -i "Capture screen <idx>:none"` + crop, Linux `x11grab -i :0.0+x,y -video_size`), 30 fps, `-c:v libx264 -preset ultrafast -crf 18`, stopped by writing `q` to stdin. Both expose `start() -> t0`, `now() -> seconds since t0`, `stop() -> path`, `abort()` (error path, never raises).
+- `tts.py` — `synthesize(text, ref_wav, backend) -> (np.ndarray float32 mono, sr)`. Backends: `turbo` (`chatterbox.tts_turbo.ChatterboxTurboTTS.from_pretrained(device)`), `nano` (same with `nano=True`; only git builds of chatterbox-tts ship it, the PyPI releases ≤ 0.1.7 do not, so a build without it raises a clear `TTSError`), `classic` (`chatterbox.tts.ChatterboxTTS`, uses `exaggeration`/`cfg_weight`), `tone` (synthetic: a quiet 220 Hz tone + amplitude envelope, length = words/2.5 s, for tests/dry runs; needs no ML deps), `auto` (cuda/rocm/mps → turbo; otherwise nano when the installed chatterbox has it, else turbo). Loads the model once per process; the "run prefetch" hint is added only for Hugging Face cache/offline errors. Writes WAV via soundfile at the model's `sr` (24000). Stats helper: duration, peak/rms dBFS, `silent` (rms < -50 dBFS), `clipped` (>0.5% samples at |1.0|).
 - `narration.py` — template generation, JSON validation (`{"intro": str, "outro": str, "steps": [{"id","text"}]}`, ids must equal scenario step ids in order, per-segment ≤ 45 words, total words ≤ max_length_seconds * 2.6), LLM request via an OpenAI-compatible `/v1/chat/completions` POST (urllib only, no SDK) with a strict JSON-only instruction, one repair retry, then template fallback.
 - `pacing.py` — pure functions: given `durations.json` and step order, compute planned start offsets: intro plays from t=0 while holding on the first screen; `step[i].t_start = max(prev.t_end + 0.3, prev.t_start + durations[prev.id])`; outro starts at `max(last.t_end, last.t_start + durations[last.id])`; capture ends 2.0 s after outro end. `record` uses this live (waits before each step); `edit` reads the actual times from `markers.json`.
 - `markers.py` — schema: `{"capture_start_epoch": float, "intro_t": 0.0, "outro_t": float, "end_t": float, "steps": [{"id","t_start","t_end","status","wait_windows": [[t0,t1],...]}]}`.
@@ -115,6 +133,8 @@ Actions: `goto` (path or absolute URL), `click` (selector), `fill`
 (name). Expect: `text` (visible page text contains), `selector` (+ optional
 `contains`, `count_min`), `url_contains`, `not_text`. Relative file paths are
 resolved against the scenario file's directory. Step `timeout_s` default 60.
+Unknown top-level keys are rejected (`$schema` is allowed); `count_min` must be an
+integer; `login.url` must be non-empty. `selector` counts visible elements only.
 
 ## Timing model
 
@@ -129,24 +149,26 @@ optional wait-window speed-ups.
 ## Test strategy (all runnable here, no GPU, no display)
 
 - Unit: scenario validation errors, pacing math, edit timeline computation (pure function returns the list of segments + audio offsets), narration validation + template, tts `tone` backend + stats, markers I/O, verify parsing on synthetic media (`lavfi testsrc`/`sine`).
-- Browser: headless Chromium (`/opt/pw-browsers/chromium-1194/chrome-linux/chrome` here) over CDP against `tests/fixtures/app` served by `http.server` on a random port: login form, file upload chips, ask → delayed answer with citation. Cover a PASS scenario and a FAIL scenario (wrong expectation) with exit code 2 and a failure report containing console errors.
+- Browser: headless Chromium (whatever `DEMO_SMOKE_CHROME` or Chrome discovery finds; skipped when none) over CDP against `tests/fixtures/app` served by `http.server` on a random port: login form, file upload chips, ask → delayed answer with citation. Cover a PASS scenario and a FAIL scenario (wrong expectation) with exit code 2 and a failure report containing console errors.
 - E2E (`tests/test_e2e_run.py`): `run` with `--tts tone --capture screencast --narration template --headless` against the fixture app → `final/*.mp4` exists, verify passes, `result.json.verdict == "PASS"`.
 - Lint: `ruff check .` clean with default rules.
 
-Test venv here: `/home/user/dev/.venv-smoke/bin/python` (playwright, pytest,
-numpy, soundfile, ruff, imageio-ffmpeg installed). Never `pip install`
-torch/chatterbox in this container; the ML backends are exercised by unit
-tests only through a mocked import.
+Test tooling: `requirements.txt` + `requirements-dev.txt` (pytest, ruff) in a
+venv, plus a Chrome/Chromium binary. Never `pip install` torch/chatterbox for
+the tests; the ML backends are exercised by unit tests only through a mocked
+import.
 
 ## Function contract (builders must match these exactly)
 
 ```python
 # demo_smoke/env.py
-def detect(base_url: str | None = None, model: str | None = None) -> dict        # doctor report
+def detect(base_url: str | None = None, model: str | None = None, timeout: int | None = None) -> dict   # doctor report; timeout -> tool-call probe
 def find_ffmpeg() -> str                      # raises RuntimeError with install hint if none
 def find_ffprobe() -> str | None
 def find_chrome() -> str | None
 def torch_device() -> str                     # "cuda" | "rocm" | "mps" | "cpu" | "none" (torch missing)
+def chatterbox_nano_supported() -> bool | None   # None when chatterbox is not importable
+def hf_cache_dir() -> str ; def hf_weights_present(cache: str | None = None) -> dict   # {"turbo","nano","classic": bool}
 class Paths:                                  # Paths(out).raw/.audio/.clips/.final/.logs (Path), mkdirs on init
 def media_info(path) -> dict                  # {"duration": float, "width": int, "height": int, "has_audio": bool, "audio_duration": float|None} via ffprobe or ffmpeg -i parsing
 
@@ -158,7 +180,9 @@ class ScenarioError(ValueError)
 # demo_smoke/chrome.py
 class ChromeSession:                          # context manager
     page; context; browser; cdp               # cdp = page.context.new_cdp_session(page)
-    window_bounds: dict                       # {"x","y","width","height"} from Browser.getWindowBounds
+    window_bounds: dict                       # {"x","y","width","height"} from Browser.getWindowBounds (DIPs)
+    ui_insets: dict                           # {"x","y"} browser UI between window origin and page area (DIPs)
+    device_scale_factor: float                # physical pixels per DIP (window.devicePixelRatio)
     def close(self) -> None
 def launch(out: Path, viewport: dict, headless: bool = False) -> ChromeSession
 
@@ -173,12 +197,16 @@ def dryrun(scenario: dict, out: Path, headless: bool = False) -> dict
 #   writes logs/step-NN-<id>.png, logs/smoke-results.md, logs/dryrun.json ; retries the whole scenario once on failure
 def record(scenario: dict, out: Path, capture: str, headless: bool, durations: dict) -> dict
 #   -> markers dict (see markers.py); writes raw/capture.mp4 and logs/markers.json
-def run_steps(page, scenario: dict, out: Path, clock=None, pacer=None, screenshot_prefix: str = "step") -> list[dict]
+def run_steps(page, scenario: dict, out: Path, clock=None, pacer=None, screenshot_prefix: str = "step",
+              do_login: bool = True) -> list[dict]
 #   shared executor; clock() -> seconds since capture start (or None); pacer(step_index, step_id) blocks until this step may start
+#   do_login=False when the caller already logged in (record does, so it can hold the first screen during the intro)
 
 # demo_smoke/capture.py
-class ScreencastCapture:  def __init__(self, session: ChromeSession, out: Path, fps: int = 30); start(); now() -> float; stop() -> Path
-class ScreenCapture:      def __init__(self, session: ChromeSession, out: Path, fps: int = 30); start(); now() -> float; stop() -> Path
+class ScreencastCapture:  def __init__(self, session: ChromeSession, out: Path, fps: int = 30); start(); now() -> float; stop() -> Path; abort()
+class ScreenCapture:      def __init__(self, session: ChromeSession, out: Path, fps: int = 30); start(); now() -> float; stop() -> Path; abort()
+def grab_args(ffmpeg, os_name, bounds, fps, out_path, screen_index: int = 0, display=None, scale: float = 1.0) -> list[str]
+def page_bounds(session) -> dict              # window_bounds + ui_insets, viewport-sized (DIPs)
 def make(kind: str, session, out: Path) -> ScreencastCapture | ScreenCapture
 
 # demo_smoke/tts.py
@@ -186,7 +214,7 @@ def synthesize(text: str, ref_wav: Path | None, backend: str = "auto", device: s
                exaggeration: float = 0.5, cfg_weight: float = 0.5) -> tuple["np.ndarray", int]
 def synth_all(out: Path, ref_wav: Path | None, backend: str = "auto") -> dict      # reads audio/narration.json, writes seg-*.wav + audio/durations.json, returns durations
 def audio_stats(wav, sr: int) -> dict         # {"duration","peak_dbfs","rms_dbfs","silent","clipped"}
-def resolve_backend(backend: str) -> str      # "auto" -> "turbo"/"nano" by torch_device()
+def resolve_backend(backend: str) -> str      # "auto" -> "turbo" on cuda/rocm/mps; else "nano" if chatterbox_nano_supported() else "turbo"
 
 # demo_smoke/narration.py
 def template(scenario: dict) -> dict
@@ -221,6 +249,7 @@ def chat(base_url: str, model: str, messages: list, tools: list | None = None, t
          temperature: float = 0.1, response_json: bool = False) -> dict          # raw response; raises LLMError(msg)
 def probe_tool_call(base_url: str, model: str, timeout: int = 120) -> dict        # {"pass": bool, "detail": str}
 def reachable(base_url: str, timeout: int = 5) -> bool                            # GET {base_url}/models
+def opener_for(url: str) -> urllib.request.OpenerDirector                         # proxy-free for loopback hosts
 class LLMError(RuntimeError)
 
 # demo_smoke/cli.py

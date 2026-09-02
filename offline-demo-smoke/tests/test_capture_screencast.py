@@ -78,25 +78,79 @@ def test_grab_args_per_os(os_name, tmp_path):
         assert argv[argv.index("-video_size") + 1] == "1280x720"  # even sizes for yuv420p
     elif os_name == "Darwin":
         assert argv[argv.index("-f") + 1] == "avfoundation"
-        assert argv[argv.index("-i") + 1] == "1:none"
+        # the screen is addressed by name: index 0 = main display regardless of attached cameras
+        assert argv[argv.index("-i") + 1] == "Capture screen 0:none"
         assert argv[argv.index("-vf") + 1] == "crop=1280:720:10:20"
     else:
         assert argv[argv.index("-f") + 1] == "x11grab"
         assert argv[argv.index("-i") + 1] == ":0.0+10,20"
         assert argv[argv.index("-video_size") + 1] == "1280x720"
+    assert "-vf" not in argv or os_name == "Darwin"          # no rescale at scale 1.0
 
 
-def test_screen_capture_uses_window_bounds_and_refuses_headless(tmp_path):
+@pytest.mark.parametrize("os_name", ["Windows", "Darwin", "Linux"])
+def test_grab_args_scale_hidpi(os_name, tmp_path):
+    """Retina (2x) / Windows 125% scaling: grab in physical pixels, scale back to the viewport."""
+    out = tmp_path / "capture.mp4"
+    bounds = {"x": 10, "y": 88, "width": 1280, "height": 720}
+    argv = capture.grab_args("ffmpeg", os_name, bounds, 30, out, screen_index=1, scale=2.0)
+    if os_name == "Windows":
+        assert argv[argv.index("-offset_x") + 1] == "20" and argv[argv.index("-offset_y") + 1] == "176"
+        assert argv[argv.index("-video_size") + 1] == "2560x1440"
+        assert argv[argv.index("-vf") + 1] == "scale=1280:720:flags=bicubic"
+    elif os_name == "Darwin":
+        assert argv[argv.index("-i") + 1] == "Capture screen 1:none"
+        assert argv[argv.index("-vf") + 1] == "crop=2560:1440:20:176,scale=1280:720:flags=bicubic"
+    else:
+        assert argv[argv.index("-i") + 1] == ":0.0+20,176"
+        assert argv[argv.index("-video_size") + 1] == "2560x1440"
+        assert argv[argv.index("-vf") + 1] == "scale=1280:720:flags=bicubic"
+    argv = capture.grab_args("ffmpeg", "Windows", bounds, 30, out, scale=1.25)
+    assert argv[argv.index("-video_size") + 1] == "1600x900"
+    assert argv[argv.index("-offset_y") + 1] == "110"
+
+
+def test_page_bounds_excludes_browser_ui():
     session = SimpleNamespace(viewport={"width": 1280, "height": 720},
-                              window_bounds={"x": 0, "y": 0, "width": 1280, "height": 808}, headless=True)
+                              window_bounds={"x": 0, "y": 0, "width": 1280, "height": 859},
+                              ui_insets={"x": 0, "y": 139})
+    assert capture.page_bounds(session) == {"x": 0, "y": 139, "width": 1280, "height": 720}
+    legacy = SimpleNamespace(viewport={"width": 1280, "height": 720},
+                             window_bounds={"x": 5, "y": 7, "width": 1280, "height": 808})
+    assert capture.page_bounds(legacy) == {"x": 5, "y": 7, "width": 1280, "height": 808}
+
+
+def test_screen_capture_uses_page_area_and_refuses_headless(tmp_path, monkeypatch):
+    session = SimpleNamespace(viewport={"width": 1280, "height": 720},
+                              window_bounds={"x": 0, "y": 0, "width": 1280, "height": 808},
+                              ui_insets={"x": 0, "y": 88}, device_scale_factor=1.0, headless=True)
+    monkeypatch.setenv("DEMO_SMOKE_SCREEN_INDEX", "2")
     cap = capture.make("screen", session, tmp_path)
     assert isinstance(cap, capture.ScreenCapture)
     argv = cap.args(ffmpeg="ffmpeg", os_name="Linux")
-    assert argv[argv.index("-video_size") + 1] == "1280x808"
+    assert argv[argv.index("-video_size") + 1] == "1280x720"        # viewport, not the outer window
+    assert argv[argv.index("-i") + 1] == ":0.0+0,88"                 # offset by the tab strip/toolbar
+    assert cap.args(ffmpeg="ffmpeg", os_name="Darwin")[cap.args(ffmpeg="ffmpeg", os_name="Darwin").index("-i") + 1] \
+        == "Capture screen 2:none"
     with pytest.raises(capture.CaptureError, match="screencast"):
         cap.start()
     with pytest.raises(capture.CaptureError, match="unknown capture backend"):
         capture.make("webcam", session, tmp_path)
+
+
+def test_screen_capture_abort_stops_grabber(tmp_path):
+    """The error path must end the ffmpeg child and close its log handle."""
+    import sys
+
+    session = SimpleNamespace(viewport={"width": 64, "height": 64}, headless=False)
+    cap = capture.ScreenCapture(session, tmp_path)
+    cap._log = open(cap.log_path, "wb")  # noqa: SIM115 - mirrors start()
+    cap._proc = subprocess.Popen([sys.executable, "-c", "import sys; sys.stdin.read()"],
+                                 stdin=subprocess.PIPE, stdout=cap._log, stderr=subprocess.STDOUT)
+    assert cap._proc.poll() is None
+    cap.abort()
+    assert cap._proc.poll() is not None and cap._log.closed and cap._stopped
+    cap.abort()   # idempotent
 
 
 def test_concat_list_repeats_last_frame(tmp_path):
@@ -140,6 +194,34 @@ def test_screencast_capture_two_seconds(tmp_path):
     assert 1.7 <= media_duration(path) <= 2.7
 
 
+def test_record_aborts_capture_on_error(tmp_path, monkeypatch):
+    """An exception between cap.start() and cap.stop() must not leave the capture running."""
+    _need_chrome()
+    path = SCEN_DIR / "fixture-pass.json"
+    scenario = json.loads(path.read_text(encoding="utf-8"))
+    scenario["_dir"] = path.parent
+    seen: dict = {}
+    real_make = capture.make
+
+    def make(kind, session, out):
+        seen["cap"] = real_make(kind, session, out)
+        return seen["cap"]
+
+    def boom(*a, **kw):
+        raise RuntimeError("step executor crashed")
+
+    monkeypatch.setattr(capture, "make", make)
+    monkeypatch.setattr(drive, "run_steps", boom)
+    with _serve_dir()(APP_DIR) as base:
+        scenario["app_url"] = base
+        with pytest.raises(RuntimeError, match="step executor crashed"):
+            drive.record(scenario, tmp_path, "screencast", True, {"intro": 0.2})
+    cap = seen["cap"]
+    assert cap._stopped is True
+    assert (tmp_path / "raw" / "frames.json").exists()          # abort() still writes the index
+    assert not (tmp_path / "logs" / "markers.json").exists()
+
+
 def test_record_writes_capture_and_markers(tmp_path):
     _need_chrome()
     path = SCEN_DIR / "fixture-pass.json"
@@ -164,6 +246,51 @@ def test_record_writes_capture_and_markers(tmp_path):
     last = markers["steps"][-1]
     assert markers["outro_t"] >= last["t_end"]
     assert markers["end_t"] == pytest.approx(markers["outro_t"] + 0.4, abs=0.01)
+    assert markers["verdict"] == "PASS" and "error" not in markers
+    assert markers["device_scale_factor"] >= 1.0 and "y" in markers["ui_insets"]
     assert (tmp_path / "logs" / "record-01-open.png").exists()
     video_s = media_duration(tmp_path / "raw" / "capture.mp4")
     assert abs(video_s - (markers["end_t"] + 2.0)) <= 0.6
+
+
+def _jpeg_size(path: Path) -> tuple[int, int]:
+    """(width, height) from the JPEG SOF marker; no image library needed."""
+    data = path.read_bytes()
+    i = 2
+    while i < len(data) - 9:
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        marker = data[i + 1]
+        if marker in (0xC0, 0xC1, 0xC2):
+            return int.from_bytes(data[i + 7:i + 9], "big"), int.from_bytes(data[i + 5:i + 7], "big")
+        i += 2 + int.from_bytes(data[i + 2:i + 4], "big")
+    raise AssertionError(f"no SOF marker in {path}")
+
+
+def test_screencast_frames_match_viewport(tmp_path):
+    """Regression: Playwright's viewport emulation lives on *its* CDP session, so the
+    screencast on our session used to capture the raw --headless=new window area
+    (1280x580 for a 1280x720 window) and the assembler padded the rest.  The
+    fixture app plus the cursor overlay (which forces repaints) reproduced it."""
+    from demo_smoke import cursor
+
+    _need_chrome()
+    viewport = {"width": 1280, "height": 720}
+    with _serve_dir()(APP_DIR) as base, chrome.launch(tmp_path, viewport, headless=True) as session:
+        cursor.install(session.cdp)
+        page = session.page
+        page.goto(base + "/index.html", wait_until="load")
+        page.wait_for_timeout(200)
+        cap = capture.make("screencast", session, tmp_path)
+        cap.start()
+        for i in range(6):
+            page.mouse.move(150 + i * 120, 200 + i * 40, steps=4)
+            page.wait_for_timeout(150)
+        cap.stop()
+    assert cap.note == "", cap.note
+    assert len(cap.frames) >= 2
+    frames = json.loads((tmp_path / "raw" / "frames.json").read_text(encoding="utf-8"))
+    assert frames["frame_sizes"] == {"1280x720": len(cap.frames)}, frames["frame_sizes"]
+    sizes = {_jpeg_size(tmp_path / "raw" / f["file"]) for f in frames["frames"]}
+    assert sizes == {(1280, 720)}, sizes

@@ -1,0 +1,3 @@
+# ripgrep / OpenCode honour .gitignore, which hides demo-output/. Re-include it so the
+# agent's glob/grep/read tools can see the kit's outputs (logs/*.json, report.md).
+!demo-output/

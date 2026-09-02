@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 import pytest
 
@@ -26,9 +27,19 @@ def test_example_scenario_loads(example_scenario_path):
         assert st["narration"]
 
 
-def test_example_check_files_reports_missing_fixture(example_scenario_path):
-    with pytest.raises(scenario.ScenarioError, match="upload file.*osha-1910.pdf"):
-        scenario.load(example_scenario_path, check_files=True)
+def test_example_ships_its_fixture(example_scenario_path):
+    s = scenario.load(example_scenario_path, check_files=True)      # must not raise
+    assert Path(s["steps"][1]["actions"][0]["upload"]["files"][0]).is_file()
+
+
+def test_check_files_reports_missing_fixture(example_scenario_path, tmp_path):
+    data = json.loads(example_scenario_path.read_text())
+    data["steps"][1]["actions"][0]["upload"]["files"] = ["fixtures/missing-manual.pdf"]
+    p = tmp_path / "copy.json"
+    p.write_text(json.dumps(data))
+    scenario.load(p)                                                 # fine without check_files
+    with pytest.raises(scenario.ScenarioError, match="upload file.*missing-manual.pdf"):
+        scenario.load(p, check_files=True)
 
 
 def test_defaults_applied(tmp_path):
@@ -104,6 +115,11 @@ def test_load_raises_joined_messages(tmp_path):
         (lambda d: d["steps"][0].update(actions=[{"screenshot": "../x"}]), "screenshot"),
         (lambda d: d["steps"][0].update(expect=[{"text": "a", "selector": "b"}]), "exactly one of"),
         (lambda d: d["steps"][0].update(expect=[{"selector": "b", "count_min": "many"}]), "count_min"),
+        (lambda d: d["steps"][0].update(expect=[{"selector": "b", "count_min": 1.5}]), "count_min"),
+        (lambda d: d.update(foo=1), "unknown top-level key 'foo'"),
+        (lambda d: d.update(login={"type": "form", "url": "", "username_selector": "#u",
+                                   "password_selector": "#p", "submit_selector": "#s",
+                                   "username_env": "U", "password_env": "P"}), "login.url"),
         (lambda d: d["steps"][0].update(expect=[{"text": "a", "contains": "b"}]), "unknown key 'contains'"),
         (lambda d: d["steps"][0].update(expect=[{"nope": "a"}]), "exactly one of"),
         (lambda d: d["steps"][0].update(expect="x"), "expect must be a list"),
@@ -134,6 +150,8 @@ def test_validate_accepts_every_action_and_expect():
     d["login"] = {"type": "form", "url": "/login", "username_selector": "#u", "password_selector": "#p",
                   "submit_selector": "#s", "username_env": "U", "password_env": "P",
                   "success_selector": "nav"}
+    d["$schema"] = "./schema.json"          # editor hint, allowed
+    d["_dir"] = "/tmp"                       # added by load(), allowed on re-validation
     assert scenario.validate(d) == []
     assert scenario.validate("not a dict") == ["scenario must be a JSON object"]
 

@@ -3,9 +3,11 @@
 * ``tone``   synthetic 220 Hz tone with 8 Hz amplitude modulation, no ML deps,
              duration = max(0.8, words / 2.5) s; for tests and dry runs.
 * ``turbo``  chatterbox.tts_turbo.ChatterboxTurboTTS
-* ``nano``   same class with ``nano=True`` (CPU-friendly)
+* ``nano``   same class with ``nano=True`` (CPU-friendly).  Only chatterbox-tts
+             builds from git ship it; the PyPI releases (<= 0.1.7) do not.
 * ``classic`` chatterbox.tts.ChatterboxTTS (uses exaggeration / cfg_weight)
-* ``auto``   cuda/rocm/mps -> turbo, otherwise nano
+* ``auto``   cuda/rocm/mps -> turbo; otherwise nano when the installed
+             chatterbox has it, else turbo (works on CPU, slowly)
 
 Chatterbox is imported lazily inside functions; the loaded model is cached per
 process in ``_MODELS``.  Offline env vars are set before import unless
@@ -15,9 +17,11 @@ process in ``_MODELS``.  Offline env vars are set before import unless
 from __future__ import annotations
 
 import importlib
+import inspect
 import json
 import math
 import os
+import re
 from pathlib import Path
 
 import numpy as np
@@ -30,6 +34,14 @@ TONE_PEAK_DBFS = -20.0
 WORDS_PER_SECOND = 2.5
 MIN_SECONDS = 0.8
 INSTALL_HINT = "pip install -r requirements-tts.txt (see README for torch index URLs)"
+NANO_HINT = ("the installed chatterbox-tts has no Nano model (PyPI releases up to 0.1.7 ship "
+             "Turbo/classic only); install chatterbox-tts from git (see README 'TTS model choice') "
+             "or use --tts turbo / --tts classic")
+# Exception class names huggingface_hub raises for a missing/offline snapshot.
+_HF_CACHE_ERRORS = ("LocalEntryNotFoundError", "OfflineModeIsEnabled", "EntryNotFoundError",
+                    "RepositoryNotFoundError", "RevisionNotFoundError", "HfHubHTTPError",
+                    "GatedRepoError")
+_HF_CACHE_RE = re.compile(r"(?i)cache|offline|huggingface|hf_hub|snapshot|cannot reach|not found")
 
 _MODELS: dict = {}
 
@@ -47,9 +59,13 @@ def resolve_backend(backend: str) -> str:
         raise TTSError(f"unknown --tts backend '{backend}'; choose one of {', '.join(BACKENDS)}")
     if b != "auto":
         return b
-    from .env import torch_device
+    from .env import chatterbox_nano_supported, torch_device
 
-    return "turbo" if torch_device() in ("cuda", "rocm", "mps") else "nano"
+    if torch_device() in ("cuda", "rocm", "mps"):
+        return "turbo"
+    # CPU (or no torch yet): Nano is the CPU model, but only git builds of
+    # chatterbox-tts ship it; the PyPI wheels fall back to Turbo.
+    return "nano" if chatterbox_nano_supported() else "turbo"
 
 
 def set_offline_env(online: bool = False) -> None:
@@ -159,6 +175,25 @@ def _device(device: str | None) -> str:
     return "cuda" if d == "rocm" else d
 
 
+def _accepts_nano(cls) -> bool:
+    try:
+        return "nano" in inspect.signature(cls.from_pretrained).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def _looks_like_cache_miss(exc: BaseException) -> bool:
+    """Is this a Hugging Face cache/offline error (as opposed to any other failure)?"""
+    for e in (exc, getattr(exc, "__cause__", None), getattr(exc, "__context__", None)):
+        if e is None:
+            continue
+        if e.__class__.__name__ in _HF_CACHE_ERRORS:
+            return True
+        if isinstance(e, (FileNotFoundError, OSError)) and _HF_CACHE_RE.search(str(e) or ""):
+            return True
+    return False
+
+
 def load_model(backend: str, device: str | None = None, online: bool = False):
     """Load (once per process) and return the chatterbox model for ``backend``."""
     backend = resolve_backend(backend)
@@ -175,8 +210,12 @@ def load_model(backend: str, device: str | None = None, online: bool = False):
             cls = getattr(mod, "ChatterboxTurboTTS", None)
             if cls is None:
                 raise TTSError("chatterbox.tts_turbo has no ChatterboxTurboTTS; upgrade chatterbox-tts")
-            model = cls.from_pretrained(device=dev, nano=True) if backend == "nano" \
-                else cls.from_pretrained(device=dev)
+            if backend == "nano":
+                if not _accepts_nano(cls):
+                    raise TTSError(NANO_HINT)
+                model = cls.from_pretrained(device=dev, nano=True)
+            else:
+                model = cls.from_pretrained(device=dev)
         else:
             mod = _import("chatterbox.tts")
             cls = getattr(mod, "ChatterboxTTS", None)
@@ -186,9 +225,12 @@ def load_model(backend: str, device: str | None = None, online: bool = False):
     except TTSError:
         raise
     except Exception as e:  # noqa: BLE001 - HF/torch raise many types; surface one line
-        offline = os.environ.get("HF_HUB_OFFLINE") == "1"
-        hint = (" Weights missing from the HF cache? run `python -m demo_smoke prefetch "
-                f"--tts {backend}` while online." if offline else "")
+        hint = ""
+        if _looks_like_cache_miss(e):
+            hint = (" Weights missing from the HF cache? run `python -m demo_smoke prefetch "
+                    f"--tts {backend}` while online" + (
+                        "." if os.environ.get("HF_HUB_OFFLINE") == "1" else
+                        " (or pass --online to download now)."))
         raise TTSError(f"failed to load chatterbox '{backend}' on {dev}: {e}.{hint}") from None
     _MODELS[key] = model
     return model

@@ -6,7 +6,9 @@ monotonic timestamps and assembled into ``raw/capture.mp4`` on ``stop()`` with
 the ffmpeg concat demuxer at 30 fps CFR.
 
 ``ScreenCapture`` runs an OS screen grabber (gdigrab / avfoundation / x11grab)
-over the Chrome window bounds; it needs a real display.
+over the page area of the Chrome window (window bounds offset by the measured
+browser-UI insets, scaled by the display's backing scale factor and scaled back
+to the viewport size); it needs a real display.
 
 Both expose ``start() -> t0``, ``now() -> seconds since t0``, ``stop() -> Path``.
 """
@@ -121,6 +123,7 @@ class ScreencastCapture:
         self._stopped = False
         self._handler = None
         self._dropped = 0
+        self.frame_sizes: dict[str, int] = {}  # "WxH" reported by Chrome -> frame count
 
     # -- CDP plumbing -------------------------------------------------------
     def _on_frame(self, event: dict) -> None:
@@ -133,6 +136,10 @@ class ScreencastCapture:
                 name = f"{index:06d}.jpg"
                 (self.frames_dir / name).write_bytes(base64.b64decode(event["data"]))
                 self.frames.append((name, t))
+                meta = event.get("metadata") or {}
+                if meta.get("deviceWidth") and meta.get("deviceHeight"):
+                    key = f"{int(meta['deviceWidth'])}x{int(meta['deviceHeight'])}"
+                    self.frame_sizes[key] = self.frame_sizes.get(key, 0) + 1
         except Exception:
             log.debug("ignored error", exc_info=True)
             self._dropped += 1
@@ -153,6 +160,23 @@ class ScreencastCapture:
         self.t0 = time.monotonic()
         self.capture_start_epoch = time.time()
         self._started = True
+        # Device-metrics emulation is per DevTools session.  Playwright's
+        # set_viewport_size only emulates *its* session, so a screencast on this
+        # session would otherwise capture the raw window content area (in
+        # --headless=new that is --window-size minus ~140 px of browser UI, e.g.
+        # 1280x580 for a 1280x720 viewport) and the assembler would pad the
+        # missing rows.  Emulating the same viewport here makes every frame
+        # exactly viewport-sized.
+        try:
+            cdp.send("Emulation.setDeviceMetricsOverride", {
+                "width": self.viewport["width"],
+                "height": self.viewport["height"],
+                "deviceScaleFactor": 1,
+                "mobile": False,
+            })
+        except Exception as exc:
+            log.debug("handled error", exc_info=True)
+            self.note = f"could not emulate the viewport on the capture session ({_one_line(exc)})"
         try:
             cdp.send("Page.startScreencast", {
                 "format": "jpeg",
@@ -199,6 +223,21 @@ class ScreencastCapture:
         self._assemble()
         return self.path
 
+    def abort(self) -> None:
+        """Stop the screencast and drop the listener without assembling a video; never raises."""
+        if self._stopped or not self._started:
+            self._stopped = True
+            return
+        self._stopped = True
+        self.t_stop = time.monotonic() - self.t0
+        for call in (lambda: self.session.cdp.send("Page.stopScreencast"),
+                     lambda: self.session.cdp.remove_listener("Page.screencastFrame", self._handler)):
+            try:
+                call()
+            except Exception:
+                log.debug("ignored error", exc_info=True)
+        self._write_index()
+
     # -- assembly -----------------------------------------------------------
     def _synthesize_still(self) -> None:
         """Fewer than two frames arrived: fall back to a page screenshot held for the whole capture."""
@@ -215,6 +254,12 @@ class ScreencastCapture:
         self.note = f"only {got} screencast frame(s) arrived; video synthesized from a still page screenshot"
 
     def _write_index(self) -> None:
+        expected = f"{self.viewport['width']}x{self.viewport['height']}"
+        odd = {k: n for k, n in self.frame_sizes.items() if k != expected}
+        if odd:
+            detail = ", ".join(f"{n} frame(s) {k}" for k, n in sorted(odd.items()))
+            msg = f"screencast frames differ from the {expected} viewport ({detail}); scaled/padded to the viewport"
+            self.note = f"{self.note}; {msg}" if self.note else msg
         data = {
             "fps": self.fps,
             "viewport": self.viewport,
@@ -222,6 +267,7 @@ class ScreencastCapture:
             "t_stop": self.t_stop,
             "frame_count": len(self.frames),
             "dropped": self._dropped,
+            "frame_sizes": dict(self.frame_sizes),
             "note": self.note,
             "frames": [{"file": f"frames/{name}", "t": round(t, 4)} for name, t in self.frames],
         }
@@ -271,32 +317,63 @@ class ScreencastCapture:
 
 
 def grab_args(ffmpeg: str, os_name: str, bounds: dict, fps: int, out_path: Path,
-              screen_index: int = 1, display: str | None = None) -> list[str]:
-    """ffmpeg argv for the OS screen grabber (pure; ``os_name`` is Windows/Darwin/Linux)."""
-    x, y = int(bounds.get("x", 0)), int(bounds.get("y", 0))
+              screen_index: int = 0, display: str | None = None, scale: float = 1.0) -> list[str]:
+    """ffmpeg argv for the OS screen grabber (pure; ``os_name`` is Windows/Darwin/Linux).
+
+    ``bounds`` is the rectangle to record in DIPs (Chrome window coordinates);
+    ``scale`` is the display's backing scale factor.  gdigrab, avfoundation and
+    x11grab all address physical pixels, so the rectangle is multiplied by
+    ``scale`` for the grab and the frames are scaled back to ``bounds`` size so
+    the capture matches the viewport (and the edit timeline) 1:1.
+    ``screen_index`` is the macOS display number (0 = main display, where the
+    window is placed); the device is addressed by name ("Capture screen N") so
+    the number of cameras attached does not shift it.
+    """
+    scale = float(scale) if scale and scale > 0 else 1.0
     w, h = _even(bounds.get("width", 1280)), _even(bounds.get("height", 720))
+    x, y = round(int(bounds.get("x", 0)) * scale), round(int(bounds.get("y", 0)) * scale)
+    gw, gh = _even(round(w * scale)), _even(round(h * scale))
+    vf = [] if scale == 1.0 else ["-vf", f"scale={w}:{h}:flags=bicubic"]
     encode = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p",
               "-movflags", "+faststart", str(out_path)]
     head = [ffmpeg, "-hide_banner", "-loglevel", "warning", "-y"]
     if os_name == "Windows":
         return head + [
             "-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "1",
-            "-offset_x", str(x), "-offset_y", str(y), "-video_size", f"{w}x{h}",
+            "-offset_x", str(x), "-offset_y", str(y), "-video_size", f"{gw}x{gh}",
             "-i", "desktop",
-        ] + encode
+        ] + vf + encode
     if os_name == "Darwin":
+        crop = f"crop={gw}:{gh}:{x}:{y}"
         return head + [
             "-f", "avfoundation", "-framerate", str(fps), "-capture_cursor", "1",
-            "-i", f"{screen_index}:none",
-            "-vf", f"crop={w}:{h}:{x}:{y}",
+            "-i", f"Capture screen {int(screen_index)}:none",
+            "-vf", crop if scale == 1.0 else f"{crop},scale={w}:{h}:flags=bicubic",
         ] + encode
     disp = display or os.environ.get("DISPLAY") or ":0"
     if "." not in disp.split(":")[-1]:
         disp = disp + ".0"
     return head + [
         "-f", "x11grab", "-framerate", str(fps), "-draw_mouse", "1",
-        "-video_size", f"{w}x{h}", "-i", f"{disp}+{x},{y}",
-    ] + encode
+        "-video_size", f"{gw}x{gh}", "-i", f"{disp}+{x},{y}",
+    ] + vf + encode
+
+
+def page_bounds(session) -> dict:
+    """The page area to record, in DIPs: window bounds offset by the browser-UI
+    insets and sized to the viewport.  Falls back to the whole window (or the
+    viewport at 0,0) when the session does not expose insets."""
+    viewport = dict(getattr(session, "viewport", None) or {"width": 1280, "height": 720})
+    window = dict(getattr(session, "window_bounds", None) or {"x": 0, "y": 0, **viewport})
+    insets = getattr(session, "ui_insets", None)
+    if not isinstance(insets, dict):
+        return window
+    return {
+        "x": int(window.get("x", 0)) + int(insets.get("x", 0)),
+        "y": int(window.get("y", 0)) + int(insets.get("y", 0)),
+        "width": int(viewport["width"]),
+        "height": int(viewport["height"]),
+    }
 
 
 class ScreenCapture:
@@ -309,7 +386,9 @@ class ScreenCapture:
         self.paths = _paths(self.out)
         self.path = self.paths.raw / "capture.mp4"
         self.log_path = self.paths.logs / "screen-capture.log"
-        self.bounds = dict(getattr(session, "window_bounds", None) or {"x": 0, "y": 0, **session.viewport})
+        self.bounds = page_bounds(session)
+        self.scale = float(getattr(session, "device_scale_factor", 1.0) or 1.0)
+        self.screen_index = int(os.environ.get("DEMO_SMOKE_SCREEN_INDEX", "0") or 0)
         self.note = ""
         self.t0: float | None = None
         self.capture_start_epoch: float | None = None
@@ -318,7 +397,8 @@ class ScreenCapture:
         self._stopped = False
 
     def args(self, ffmpeg: str | None = None, os_name: str | None = None) -> list[str]:
-        return grab_args(ffmpeg or find_ffmpeg(), os_name or platform.system(), self.bounds, self.fps, self.path)
+        return grab_args(ffmpeg or find_ffmpeg(), os_name or platform.system(), self.bounds, self.fps, self.path,
+                         screen_index=self.screen_index, scale=self.scale)
 
     def start(self) -> float:
         if self._proc is not None:
@@ -374,6 +454,32 @@ class ScreenCapture:
         if proc.returncode not in (0, 255) or not self.path.exists():
             raise CaptureError(f"ffmpeg screen grabber failed (exit {proc.returncode}): {self._log_tail()}")
         return self.path
+
+    def abort(self) -> None:
+        """Stop the grabber without producing a usable file (error path); never raises."""
+        if self._stopped:
+            return
+        self._stopped = True
+        proc = self._proc
+        if proc is not None and proc.poll() is None:
+            try:
+                if proc.stdin and not proc.stdin.closed:
+                    proc.stdin.write(b"q\n")
+                    proc.stdin.flush()
+                    proc.stdin.close()
+                proc.wait(timeout=3)
+            except Exception:
+                log.debug("ignored error", exc_info=True)
+                try:
+                    proc.kill()
+                    proc.wait(timeout=3)
+                except Exception:
+                    log.debug("ignored error", exc_info=True)
+        if self._log and not self._log.closed:
+            try:
+                self._log.close()
+            except Exception:
+                log.debug("ignored error", exc_info=True)
 
     def _log_tail(self) -> str:
         try:

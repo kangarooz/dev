@@ -1,10 +1,18 @@
-# Voice cloning backends (Chatterbox). Install AFTER requirements.txt, online:
-#   pip install -r requirements-tts.txt
-# torch/torchaudio wheels: pick the index for your accelerator first, e.g.
-#   CUDA 12.x : pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu124
-#   ROCm      : pip install torch torchaudio --index-url https://download.pytorch.org/whl/rocm6.2
-#   CPU/macOS : pip install torch torchaudio
-# then run `python -m demo_smoke prefetch --tts turbo` once while online to fill the HF cache.
-torch>=2.2
-torchaudio>=2.2
-chatterbox-tts>=0.1
+# Voice cloning backends (Chatterbox). Install AFTER requirements.txt, online.
+#
+# 1. Install torch for your accelerator FIRST (chatterbox-tts pins torch==2.6.0):
+#      NVIDIA CUDA 12.x : pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
+#      AMD ROCm (Linux) : pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/rocm6.2.4
+#      CPU only         : pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
+#      macOS (Apple Silicon, MPS): pip install torch==2.6.0 torchaudio==2.6.0     (default PyPI wheels)
+#    `scripts/setup.sh --tts --torch auto` / `setup.ps1 -Tts` do this for you (see README "TTS model choice").
+# 2. pip install -r requirements-tts.txt
+# 3. python -m demo_smoke prefetch --tts auto   (fills the Hugging Face cache while online)
+#
+# Nano (the CPU model) is not in any PyPI release (<= 0.1.7 ship Turbo and classic only);
+# it lives on the chatterbox git master. To get it, replace the chatterbox-tts line with:
+#   chatterbox-tts @ git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2
+# `--tts auto` picks Nano on CPU only when the installed build has it, else Turbo.
+torch==2.6.0
+torchaudio==2.6.0
+chatterbox-tts>=0.1.7

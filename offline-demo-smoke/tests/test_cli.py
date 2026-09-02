@@ -49,8 +49,12 @@ def install_fakes(monkeypatch, *, dry_verdict="PASS", record_fail=False, verify_
         m = markers.new(time.time())
         for s in scenario["steps"]:
             t0 = plan["steps"][s["id"]]
-            markers.add_step(m, s["id"], t0, t0 + 2.0, "FAIL" if record_fail else "PASS", [[t0 + 0.5, t0 + 1.5]])
+            status = {"login": "SKIPPED", True: "FAIL"}.get(record_fail, "PASS")
+            markers.add_step(m, s["id"], t0, t0 + 2.0, status, [[t0 + 0.5, t0 + 1.5]])
         m["outro_t"], m["end_t"] = plan["outro_t"], plan["end_t"]
+        m["verdict"] = "PASS" if not record_fail else "FAIL"
+        if record_fail == "login":   # drive.record: login failed -> every step SKIPPED + error
+            m["error"] = "login: environment variable DEMO_USER is not set"
         (p.raw / "capture.mp4").write_bytes(b"\0")
         markers.save(m, out)
         return m
@@ -117,6 +121,23 @@ def test_check_model(out_dir, fake_llm, capsys, unreachable_url):
     assert run("check-model", "--base-url", unreachable_url, "--model", "m", "--out", out_dir) == 3
     assert "not reachable" in capsys.readouterr().err
     assert run("check-model", "--base-url", fake_llm.base_url) == 4   # --model required
+    assert json.loads((out_dir / "logs" / "check-model.json").read_text())["pass"] is False
+
+
+def test_llm_env_vars_satisfy_required_flags(out_dir, fake_llm, monkeypatch, capsys):
+    monkeypatch.setenv("DEMO_SMOKE_BASE_URL", fake_llm.base_url)
+    monkeypatch.setenv("DEMO_SMOKE_MODEL", "env-model")
+    fake_llm.queue.append({"tool_calls": [{"name": "get_step_status", "arguments": {"step_id": "open"}}]})
+    assert run("check-model", "--out", out_dir) == 0
+    assert "model=env-model" in capsys.readouterr().out
+    assert fake_llm.last_body["model"] == "env-model"
+
+
+def test_prefetch_accepts_auto(out_dir, monkeypatch, capsys):
+    monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "none")
+    assert run("prefetch", "--tts", "auto", "--out", out_dir) == 3
+    assert "torch is not installed" in capsys.readouterr().err
+    assert run("prefetch", "--tts", "tone", "--out", out_dir) == 4
 
 
 def test_narrate_template_validate_synth_voice_check(out_dir, example_scenario_path, capsys):
@@ -174,6 +195,11 @@ def test_missing_prerequisites_are_exit_3(out_dir, simple_scenario_path, capsys,
     assert "no scenario" in capsys.readouterr().err
     assert run("synth", "--out", out_dir, "--tts", "turbo") == 3   # narration exists? no -> still 3
     assert run("narrate-validate", "--out", out_dir / "empty2") == 3
+    # exit 3 leaves a machine-readable reason instead of a stale log from an earlier run
+    for cmd, sub in (("synth", out_dir), ("record", out_dir), ("edit", out_dir / "empty"),
+                     ("narrate-validate", out_dir / "empty2")):
+        log = json.loads((sub / "logs" / f"{cmd}.json").read_text())
+        assert log["exit_code"] == 3 and log["error"].startswith(f"{cmd}:"), (cmd, log)
 
 
 def test_scenario_errors_are_exit_4(out_dir, tmp_path, capsys, example_scenario_path):
@@ -184,9 +210,18 @@ def test_scenario_errors_are_exit_4(out_dir, tmp_path, capsys, example_scenario_
     assert run("narrate-template", bad, "--out", out_dir) == 4
     err = capsys.readouterr().err
     assert err.startswith("error:") and "steps[0].id" in err and "Traceback" not in err
-    # dryrun checks upload fixtures exist
-    assert run("dryrun", example_scenario_path, "--out", out_dir, "--headless") == 4
-    assert "osha-1910.pdf" in capsys.readouterr().err
+    log = json.loads((out_dir / "logs" / "narrate-template.json").read_text())
+    assert log["exit_code"] == 4 and "steps[0].id" in log["error"]
+    # dryrun checks upload fixtures exist (a copy of the example pointing at a missing file)
+    data = json.loads(example_scenario_path.read_text())
+    data["steps"][1]["actions"][0]["upload"]["files"] = ["fixtures/does-not-exist.pdf"]
+    broken = tmp_path / "broken.json"
+    broken.write_text(json.dumps(data))
+    assert run("dryrun", broken, "--out", out_dir, "--headless") == 4
+    assert "does-not-exist.pdf" in capsys.readouterr().err
+    assert json.loads((out_dir / "logs" / "dryrun.json").read_text())["exit_code"] == 4
+    # the shipped example itself has its fixture, so it gets past input validation
+    assert (example_scenario_path.parent / "fixtures" / "osha-1910.pdf").is_file()
 
 
 def test_dryrun_record_edit_verify_with_fakes(out_dir, simple_scenario_path, capsys, monkeypatch):
@@ -257,6 +292,21 @@ def test_run_record_step_failure(out_dir, simple_scenario_path, monkeypatch):
     assert run("run", simple_scenario_path, "--out", out_dir, *TONE, "--headless") == 2
     assert [c[0] for c in calls] == ["dryrun", "record"]
     assert "during recording" in json.loads((out_dir / "result.json").read_text())["error"]
+
+
+def test_record_login_failure_is_exit_2(out_dir, simple_scenario_path, monkeypatch, capsys):
+    """A failed login leaves every step SKIPPED (no FAIL): record and run must not report ok."""
+    install_fakes(monkeypatch, record_fail="login")
+    run("narrate-template", simple_scenario_path, "--out", out_dir)
+    run("synth", "--out", out_dir, *TONE)
+    capsys.readouterr()
+    assert run("record", simple_scenario_path, "--out", out_dir) == 2
+    out = capsys.readouterr().out
+    assert out.startswith("record: FAIL") and "DEMO_USER is not set" in out
+    assert run("run", simple_scenario_path, "--out", out_dir, *TONE, "--headless") == 2
+    res = json.loads((out_dir / "result.json").read_text())
+    assert res["verdict"] == "FAIL" and "DEMO_USER is not set" in res["error"]
+    assert "[record]" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("stage", ["dryrun", "record", "edit"])

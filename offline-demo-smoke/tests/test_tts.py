@@ -91,12 +91,20 @@ def test_write_wav_pcm16(tmp_path):
 def test_resolve_backend(monkeypatch):
     assert tts.resolve_backend("tone") == "tone"
     assert tts.resolve_backend("TURBO") == "turbo"
+    monkeypatch.setattr("demo_smoke.env.chatterbox_nano_supported", lambda: True)
     monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "cuda")
     assert tts.resolve_backend("auto") == "turbo"
     monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "cpu")
     assert tts.resolve_backend("auto") == "nano"
     monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "none")
     assert tts.resolve_backend("auto") == "nano"
+    # the PyPI chatterbox-tts (<= 0.1.7) has no Nano: auto must not pick a backend that cannot load
+    for missing in (False, None):
+        monkeypatch.setattr("demo_smoke.env.chatterbox_nano_supported", lambda m=missing: m)
+        monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "cpu")
+        assert tts.resolve_backend("auto") == "turbo"
+        monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "mps")
+        assert tts.resolve_backend("auto") == "turbo"
     with pytest.raises(tts.TTSError, match="unknown --tts backend"):
         tts.resolve_backend("bark")
 
@@ -190,6 +198,7 @@ def fake_chatterbox(monkeypatch):
     monkeypatch.setitem(sys.modules, "chatterbox.tts_turbo", turbo_mod)
     monkeypatch.setitem(sys.modules, "chatterbox.tts", classic_mod)
     monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "cpu")
+    monkeypatch.setattr("demo_smoke.env.chatterbox_nano_supported", lambda: True)   # git build
     return FakeTurbo, FakeClassic
 
 
@@ -288,6 +297,49 @@ def test_missing_ref_and_generate_failure(fake_chatterbox, tmp_path):
         tts.synthesize("x", None, "turbo")
 
 
+def test_pypi_build_without_nano(monkeypatch, tmp_path):
+    """chatterbox-tts 0.1.7: ``from_pretrained(cls, device)`` only.  ``--tts nano`` must
+    fail with an actionable message (not a TypeError dressed up as a cache miss), and
+    ``auto`` on CPU must use turbo."""
+    pkg, turbo_mod, classic_mod, FakeTurbo, _ = _make_fakes()
+
+    def from_pretrained(cls, device):
+        inst = cls()
+        inst.device = device
+        cls.loads.append({"device": device})
+        return inst
+
+    FakeTurbo.from_pretrained = classmethod(from_pretrained)
+    monkeypatch.setitem(sys.modules, "chatterbox", pkg)
+    monkeypatch.setitem(sys.modules, "chatterbox.tts_turbo", turbo_mod)
+    monkeypatch.setitem(sys.modules, "chatterbox.tts", classic_mod)
+    monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "cpu")
+    monkeypatch.setattr("demo_smoke.env.chatterbox_nano_supported", lambda: False)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    with pytest.raises(tts.TTSError, match="no Nano model") as ei:
+        tts.synthesize("x", None, "nano")
+    assert "prefetch" not in str(ei.value) and "\n" not in str(ei.value)
+    assert "--tts turbo" in str(ei.value)
+    wav, _sr = tts.synthesize("hello", None, "auto")
+    assert FakeTurbo.loads == [{"device": "cpu"}] and wav.shape == (2400,)
+
+
+def test_generic_load_error_has_no_prefetch_hint(monkeypatch):
+    pkg, turbo_mod, _classic_mod, FakeTurbo, _ = _make_fakes()
+
+    def fail(cls, device, nano=False):
+        raise RuntimeError("CUDA driver version is insufficient")
+
+    FakeTurbo.from_pretrained = classmethod(fail)
+    monkeypatch.setitem(sys.modules, "chatterbox", pkg)
+    monkeypatch.setitem(sys.modules, "chatterbox.tts_turbo", turbo_mod)
+    monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "cuda")
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    with pytest.raises(tts.TTSError, match="CUDA driver") as ei:
+        tts.load_model("turbo")
+    assert "prefetch" not in str(ei.value)
+
+
 def test_load_failure_mentions_prefetch_when_offline(monkeypatch):
     pkg, turbo_mod, _classic_mod, FakeTurbo, _ = _make_fakes()
 
@@ -301,3 +353,14 @@ def test_load_failure_mentions_prefetch_when_offline(monkeypatch):
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
     with pytest.raises(tts.TTSError, match="prefetch --tts nano"):
         tts.load_model("nano")
+
+    class OfflineModeIsEnabled(Exception):   # huggingface_hub's class, matched by name
+        pass
+
+    def fail_hf(cls, device, nano=False):
+        raise OfflineModeIsEnabled("HF_HUB_OFFLINE=1 is set")
+
+    FakeTurbo.from_pretrained = classmethod(fail_hf)
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    with pytest.raises(tts.TTSError, match="prefetch --tts turbo.*--online"):
+        tts.load_model("turbo", online=True)

@@ -44,7 +44,7 @@
           "required": ["type", "username_selector", "password_selector", "submit_selector", "username_env", "password_env"],
           "properties": {
             "type": {"const": "form"},
-            "url": {"type": "string", "description": "Login page path or absolute URL. Default: app_url."},
+            "url": {"type": "string", "minLength": 1, "description": "Login page path or absolute URL. Default: app_url."},
             "username_selector": {"type": "string", "minLength": 1},
             "password_selector": {"type": "string", "minLength": 1},
             "submit_selector": {"type": "string", "minLength": 1},
@@ -159,7 +159,7 @@
       "type": "object", "additionalProperties": false,
       "properties": {
         "text": {"type": "string", "minLength": 1, "description": "Visible page text contains this string."},
-        "selector": {"type": "string", "minLength": 1, "description": "At least one visible element matches."},
+        "selector": {"type": "string", "minLength": 1, "description": "At least one visible element matches (hidden elements are not counted)."},
         "contains": {"type": "string", "description": "With selector: the matched element's text contains this."},
         "count_min": {"type": "integer", "minimum": 0, "description": "With selector: at least this many matches."},
         "url_contains": {"type": "string", "minLength": 1, "description": "Current page URL contains this string."},

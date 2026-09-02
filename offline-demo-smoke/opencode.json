@@ -70,7 +70,14 @@
       },
       "models": {
         "local": {
-          "name": "whatever LM Studio loaded (local)",
+          "name": "whatever LM Studio loaded (local; needs JIT loading or one loaded model)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "your-model-id": {
+          "name": "PLACEHOLDER: replace the key with an id from `python -m demo_smoke check-model --base-url http://127.0.0.1:1234/v1 --list`",
           "limit": {
             "context": 32768,
             "output": 8192
@@ -89,6 +96,14 @@
       "python3 -m demo_smoke *": "allow",
       ".venv/bin/python -m demo_smoke *": "allow",
       ".venv\\Scripts\\python.exe -m demo_smoke *": "allow",
+      "python -m demo_smoke record-ref *": "allow",
+      "python -m demo_smoke devices *": "allow",
+      "python -m demo_smoke creds list *": "allow",
+      "python -m demo_smoke creds check *": "allow",
+      "python -m demo_smoke init-scenario *": "allow",
+      "python -m demo_smoke validate *": "allow",
+      "python -m demo_smoke inspect *": "allow",
+      "python -m demo_smoke check-model *": "allow",
       "cat *": "allow",
       "ls": "allow",
       "ls *": "allow",
@@ -100,10 +115,20 @@
       "python3 -m demo_smoke prefetch*": "deny",
       ".venv/bin/python -m demo_smoke prefetch*": "deny",
       ".venv\\Scripts\\python.exe -m demo_smoke prefetch*": "deny",
+      "python -m demo_smoke creds set *": "deny",
+      "python3 -m demo_smoke creds set *": "deny",
+      ".venv/bin/python -m demo_smoke creds set *": "deny",
+      ".venv\\Scripts\\python.exe -m demo_smoke creds set *": "deny",
       "* --online*": "deny",
       "rm -rf *": "deny",
       "del *": "deny",
       "git push*": "deny"
+    },
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow"
     },
     "edit": {
       "*": "deny",

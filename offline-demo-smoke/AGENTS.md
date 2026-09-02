@@ -5,30 +5,29 @@ The Offline Demo Smoke Kit smoke-tests a feature of a locally running web app
 and records a narrated walkthrough as an MP4, fully offline. Everything is
 deterministic Python (`python -m demo_smoke <cmd>`). Your job is small:
 run the kit's commands in order, write `audio/narration.json`, and report.
-The `demo-smoke` agent (`.opencode/agents/demo-smoke.md`) has the full playbook.
+The `demo-smoke` agent (`.opencode/agents/demo-smoke.md`) has the full playbook,
+with the exact commands and their order; follow it, this file only repeats the rules.
 
-## Golden path
-0. If `.venv/bin/python` (or `.venv\Scripts\python.exe`) exists, use it instead of `python` everywhere.
-1. `python -m demo_smoke doctor --out <out>` (read `<out>/logs/doctor.json`; `tts_ready` false -> use `--tts tone` in step 4)
-2. `python -m demo_smoke dryrun <scenario> --out <out>`  (exit 2 = feature FAIL, stop and report)
-3. Write `<out>/audio/narration.json` with the write tool, then `python -m demo_smoke narrate-validate <scenario> --out <out>`
-4. `python -m demo_smoke synth --out <out> --tts auto [--ref REF.wav]`
-5. `python -m demo_smoke record <scenario> --out <out> --capture screencast`
-6. `python -m demo_smoke edit --out <out>` then `python -m demo_smoke verify --out <out>`
-7. Report: verdict, per-step status, video path, failed checks, next action.
+## Interpreter
+Run `ls .venv/bin/python` (Windows: `dir .venv\Scripts\python.exe`) once. If it prints the path,
+use that path instead of `python` in every command; if it prints `No such file`, use `python`.
 
-One-shot with template narration: `python -m demo_smoke run <scenario> --out <out> --narration template`.
-Slash commands: `/setup`, `/smoke <scenario> [out]`, `/narrate <scenario> <out>` (both required), `/voice-check <ref.wav>`.
-No display / unattended: add `--headless` to dryrun and record.
+## Commands
+One-shot with template narration: `python -m demo_smoke run <scenario> --out <out> --narration template`
+(add `--ref REF.wav` only when the user gave a clip, `--tts tone` when doctor reports no chatterbox or `tts_ready` false).
+Slash commands: `/setup`, `/smoke <scenario> [out] [headless] [ref.wav]`, `/narrate <scenario> <out>` (both required), `/voice-check <ref.wav>`.
+No display / unattended: add `--headless` to the dryrun and record commands.
+Credentials (`DEMO_USER`, `DEMO_PASS`) come from the environment OpenCode was started in; never put them on the command line.
 
 ## Exit codes
 0 ok - 2 feature failed (summary line says FAIL) - 3 tool/pipeline error (a line starting with `error:`) - 4 bad input.
-On 2 or 3: stop, read `<out>/logs/<cmd>.json` (on 3 it holds only `error` and `exit_code`; `report.md`/`result.json` exist only after `run`), report. Never retry blindly.
-Exit 4 from `narrate-validate`: fix narration.json once, validate again, then fall back to narrate-template. Exit 4 from anything else: stop and report the `error:` line; do not edit the scenario.
+On 2 or 3: stop, read `<out>/logs/<cmd>.json`, report. On 3 it holds only `error` and `exit_code`; `report.md`/`result.json` exist only after `run`. Never retry blindly.
+Exit 4 from `narrate-validate` (line starts with `narrate-validate: INVALID`; its log has `errors` and `budget`): fix narration.json once, validate again, then fall back to narrate-template. Exit 4 from anything else: stop and report the `error:` line (the log holds only `error` and `exit_code`); do not edit the scenario.
+A command cut off by the tool timeout (no summary line, no `error:` line): do not rerun it; report `ERROR (stage: <cmd>, timed out)`.
 
 ## Never
 - Never write code or edit any file other than `<out>/audio/narration.json` (a scenario under `scenarios/` only when the user explicitly asked for it).
-- Never install packages, never fetch the web, never `git push`, never delete files.
+- Never install packages, never fetch the web (`prefetch` and `--online` are denied), never `git push`, never delete files.
 - Never run more than one command per step; never run a command that is not in the playbook.
 - Never invent results. Read the JSON the command wrote (with the read tool, exact path; do not search).
 

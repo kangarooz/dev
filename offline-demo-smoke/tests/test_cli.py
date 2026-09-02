@@ -95,12 +95,23 @@ def test_help_and_bad_input(capsys):
     assert "error:" in capsys.readouterr().err
 
 
-def test_doctor_writes_log(out_dir, capsys):
+@pytest.fixture
+def fake_chrome(monkeypatch, tmp_path) -> Path:
+    """A Chrome 'binary' that exists, so doctor/run pass their tool check on any machine."""
+    p = tmp_path / "fake-chrome"
+    p.write_text("")
+    monkeypatch.setenv("DEMO_SMOKE_CHROME", str(p))
+    return p
+
+
+def test_doctor_writes_log(out_dir, capsys, fake_chrome):
     assert run("doctor", "--out", out_dir) == 0
     out = capsys.readouterr().out
     assert out.startswith("doctor: ok ffmpeg=ok chrome=ok")
+    assert " opencode=" in out
     rep = json.loads((out_dir / "logs" / "doctor.json").read_text())
-    assert rep["ffmpeg"] and rep["chrome"]
+    assert rep["ffmpeg"] and rep["chrome"] == str(fake_chrome)
+    assert "error" not in rep and "exit_code" not in rep
 
 
 def test_doctor_with_missing_tools_and_llm(out_dir, capsys, monkeypatch, tmp_path, unreachable_url):
@@ -108,6 +119,9 @@ def test_doctor_with_missing_tools_and_llm(out_dir, capsys, monkeypatch, tmp_pat
     assert run("doctor", "--out", out_dir, "--base-url", unreachable_url) == 3
     out = capsys.readouterr().out
     assert "chrome=MISSING" in out and "llm=UNREACHABLE" in out and "hint:" in out
+    rep = json.loads((out_dir / "logs" / "doctor.json").read_text())     # contract: error + exit_code, plus the report
+    assert rep["exit_code"] == 3 and rep["error"].startswith("doctor: PROBLEMS") and "chrome" in rep["error"]
+    assert "llm unreachable" in rep["error"] and rep["hints"]
 
 
 def test_check_model(out_dir, fake_llm, capsys, unreachable_url):
@@ -120,6 +134,8 @@ def test_check_model(out_dir, fake_llm, capsys, unreachable_url):
     assert json.loads((out_dir / "logs" / "check-model.json").read_text())["pass"] is False
     assert run("check-model", "--base-url", unreachable_url, "--model", "m", "--out", out_dir) == 3
     assert "not reachable" in capsys.readouterr().err
+    log = json.loads((out_dir / "logs" / "check-model.json").read_text())
+    assert log["exit_code"] == 3 and log["error"].startswith("check-model:") and log["pass"] is False
     assert run("check-model", "--base-url", fake_llm.base_url) == 4   # --model required
     assert json.loads((out_dir / "logs" / "check-model.json").read_text())["pass"] is False
 
@@ -152,10 +168,25 @@ def test_narrate_template_validate_synth_voice_check(out_dir, example_scenario_p
     assert run("narrate-validate", example_scenario_path, "--out", out_dir) == 0
     assert run("narrate-validate", "--out", out_dir, "--max-seconds", "5") == 4
     assert "INVALID" in capsys.readouterr().out
+    log = json.loads((out_dir / "logs" / "narrate-validate.json").read_text())
+    assert log["exit_code"] == 4 and log["error"].startswith("narrate-validate: INVALID")
+    assert log["valid"] is False and log["errors"] and log["budget"] == 13
     narr["steps"][0]["id"] = "zzz"
     (out_dir / "audio" / "narration.json").write_text(json.dumps(narr))
     assert run("narrate-validate", "--out", out_dir) == 4
     assert "step ids must be exactly" in capsys.readouterr().out
+    # a narration.json that is not JSON (code fence, prose, trailing comma) is bad input, not a tool
+    # error: exit 4 with the INVALID line so the agent's fix-once / narrate-template path applies
+    (out_dir / "audio" / "narration.json").write_text("```json\n" + json.dumps(narr) + "\n```\n")
+    assert run("narrate-validate", "--out", out_dir) == 4
+    captured = capsys.readouterr()
+    assert captured.out.startswith("narrate-validate: INVALID") and "not valid JSON" in captured.out
+    assert "error:" not in captured.err
+    log = json.loads((out_dir / "logs" / "narrate-validate.json").read_text())
+    assert log["exit_code"] == 4 and "not valid JSON" in log["errors"][0] and "not valid JSON" in log["error"]
+    (out_dir / "audio" / "narration.json").write_text("[1, 2]")
+    assert run("narrate-validate", "--out", out_dir) == 4                 # valid JSON, wrong shape
+    assert "must be a JSON object" in capsys.readouterr().out
     assert run("narrate-template", example_scenario_path, "--out", out_dir) == 0
 
     assert run("synth", "--out", out_dir, *TONE) == 0
@@ -320,6 +351,73 @@ def test_run_pipeline_error_is_exit_3_with_report(out_dir, simple_scenario_path,
     assert json.loads((out_dir / "result.json").read_text())["verdict"] == "ERROR"
 
 
+def _install_fake_chatterbox_package(tmp_path, monkeypatch):
+    """A real, importable ``chatterbox`` package on disk whose ``__init__`` records
+    ``HF_HUB_OFFLINE`` at import time (like the real one, which imports huggingface_hub
+    and freezes the variable then).  Returns the marker file."""
+    site = tmp_path / "site"
+    pkg = site / "chatterbox"
+    pkg.mkdir(parents=True)
+    marker = tmp_path / "hf-offline-at-import.txt"
+    (pkg / "__init__.py").write_text(
+        "import os, pathlib\n"
+        f"pathlib.Path({str(marker)!r}).write_text(str(os.environ.get('HF_HUB_OFFLINE')))\n")
+    (pkg / "tts_turbo.py").write_text(
+        "import numpy as np\n"
+        "NANO_REPO_ID = 'ResembleAI/chatterbox-nano'\n"
+        "class ChatterboxTurboTTS:\n"
+        "    sr = 24000\n"
+        "    @classmethod\n"
+        "    def from_pretrained(cls, device, nano=False):\n"
+        "        return cls()\n"
+        "    def generate(self, text, **kw):\n"
+        "        return np.full(2400, 0.2, np.float32)\n")
+    for name in [m for m in sys.modules if m == "chatterbox" or m.startswith("chatterbox.")]:
+        monkeypatch.delitem(sys.modules, name)
+    monkeypatch.syspath_prepend(str(site))
+    import importlib
+    importlib.invalidate_caches()
+    monkeypatch.setattr("demo_smoke.env.torch_device", lambda: "cpu")
+    from demo_smoke import tts
+    tts._MODELS.clear()
+    monkeypatch.setattr(tts, "_MODELS", {})
+    return marker
+
+
+@pytest.mark.parametrize("cmd", ["synth", "voice-check", "run"])
+def test_offline_env_is_exported_before_chatterbox_imports(cmd, out_dir, simple_scenario_path, tmp_path,
+                                                            monkeypatch, capsys, fake_chrome):
+    """HF_HUB_OFFLINE=1 must be in the environment before chatterbox/__init__.py runs; a
+    find_spec("chatterbox.tts_turbo") probe used to import it first, so every offline synth
+    still went to huggingface.co and only then fell back to the cache."""
+    monkeypatch.delenv("HF_HUB_OFFLINE", raising=False)
+    monkeypatch.delenv("TRANSFORMERS_OFFLINE", raising=False)
+    marker = _install_fake_chatterbox_package(tmp_path, monkeypatch)
+    if cmd == "run":
+        install_fakes(monkeypatch)
+        code = run("run", simple_scenario_path, "--out", out_dir, "--tts", "auto", "--headless")
+        assert code == 0, capsys.readouterr()
+    else:
+        if cmd == "synth":
+            assert run("narrate-template", simple_scenario_path, "--out", out_dir) == 0
+        assert run(cmd, "--out", out_dir, "--tts", "auto") == 0, capsys.readouterr()
+    assert marker.is_file(), "the fake chatterbox package was never imported"
+    assert marker.read_text() == "1"
+    assert "chatterbox" in sys.modules
+    for name in [m for m in sys.modules if m == "chatterbox" or m.startswith("chatterbox.")]:
+        monkeypatch.delitem(sys.modules, name)
+
+
+def test_doctor_never_imports_chatterbox(out_dir, tmp_path, monkeypatch, fake_chrome):
+    """doctor stays cheap and side-effect free: chatterbox (torch + transformers + huggingface_hub)
+    is detected by locating the package and reading tts_turbo.py, never by importing it."""
+    marker = _install_fake_chatterbox_package(tmp_path, monkeypatch)
+    assert run("doctor", "--out", out_dir) == 0
+    rep = json.loads((out_dir / "logs" / "doctor.json").read_text())
+    assert rep["chatterbox"] is True and rep["chatterbox_nano"] is True and rep["tts_auto"] == "nano"
+    assert not marker.exists() and "chatterbox" not in sys.modules
+
+
 def test_run_missing_tool_is_exit_3(out_dir, simple_scenario_path, monkeypatch, tmp_path, capsys):
     calls = install_fakes(monkeypatch)
     monkeypatch.setenv("DEMO_SMOKE_CHROME", str(tmp_path / "nochrome"))
@@ -340,8 +438,12 @@ def test_run_with_llm_narration(out_dir, simple_scenario_path, monkeypatch, fake
     assert "[narrate] source=llm" in out
     res = json.loads((out_dir / "result.json").read_text())
     assert res["narration_source"] == "llm" and res["env"]["llm"]["tool_call"]["pass"] is True
-    assert run("run", simple_scenario_path, "--out", out_dir, *TONE, "--headless", "--narration", "llm") == 3
+    # missing flags are bad input, reported before doctor/dryrun run (exit 4, not 3)
+    calls = install_fakes(monkeypatch)
+    assert run("run", simple_scenario_path, "--out", out_dir, *TONE, "--headless", "--narration", "llm") == 4
     assert "needs --base-url" in capsys.readouterr().err
+    assert calls == []
+    assert json.loads((out_dir / "logs" / "run.json").read_text())["exit_code"] == 4
 
 
 def test_run_bad_scenario_is_exit_4(out_dir, tmp_path, monkeypatch, capsys):

@@ -123,6 +123,23 @@ def test_load_raises_joined_messages(tmp_path):
         (lambda d: d["steps"][0].update(expect=[{"text": "a", "contains": "b"}]), "unknown key 'contains'"),
         (lambda d: d["steps"][0].update(expect=[{"nope": "a"}]), "exactly one of"),
         (lambda d: d["steps"][0].update(expect="x"), "expect must be a list"),
+        # unknown keys are rejected like scenarios/schema.json (additionalProperties: false)
+        (lambda d: d.update(login={"type": "none", "password": "x"}), "login has unknown key 'password'"),
+        (lambda d: d.update(login={"type": "form", "url": "/l", "username_selector": "#u",
+                                   "password_selector": "#p", "submit_selector": "#s",
+                                   "username_env": "U", "password_env": "P", "password": "hunter2"}),
+         "login has unknown key 'password'"),
+        (lambda d: d.update(login={"type": "basic", "username_env": "U", "password_env": "P", "url": "/x"}),
+         "login has unknown key 'url'"),
+        (lambda d: d.update(viewport={"width": 10, "height": 10, "scale": 2}), "viewport has unknown key 'scale'"),
+        (lambda d: d["steps"][0].update(actions=[{"fill": {"selector": "a", "text": "x", "delay_ms": 1}}]),
+         "fill has unknown key 'delay_ms'"),
+        (lambda d: d["steps"][0].update(actions=[{"type": {"selector": "a", "text": "x", "speed": 1}}]),
+         "type has unknown key 'speed'"),
+        (lambda d: d["steps"][0].update(actions=[{"upload": {"selector": "a", "files": ["f"], "name": "n"}}]),
+         "upload has unknown key 'name'"),
+        (lambda d: d["steps"][0].update(actions=[{"wait": {"ms": 5, "seconds": 1}}]), "wait has unknown key 'seconds'"),
+        (lambda d: d.update(_private=1), "unknown top-level key '_private'"),
     ],
 )
 def test_validate_messages(mutate, needle):
@@ -152,6 +169,7 @@ def test_validate_accepts_every_action_and_expect():
                   "success_selector": "nav"}
     d["$schema"] = "./schema.json"          # editor hint, allowed
     d["_dir"] = "/tmp"                       # added by load(), allowed on re-validation
+    d["_path"] = "/tmp/s.json"
     assert scenario.validate(d) == []
     assert scenario.validate("not a dict") == ["scenario must be a JSON object"]
 

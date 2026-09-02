@@ -59,6 +59,26 @@ def test_find_chrome(monkeypatch, tmp_path):
     assert found is None or Path(found).is_file()
 
 
+def test_find_chrome_playwright_layouts(monkeypatch, tmp_path):
+    """Both the legacy chrome-linux layout and Playwright's Chrome-for-Testing layouts are found."""
+    monkeypatch.delenv("DEMO_SMOKE_CHROME", raising=False)
+    monkeypatch.setattr(env, "_CHROME_CANDIDATES", {})
+    monkeypatch.setattr(env.shutil, "which", lambda name: None)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    pats = env.playwright_chrome_patterns()
+    assert any(p.endswith("chromium-*/chrome-linux64/chrome") for p in pats)
+    assert any(p.endswith("chromium-*/chrome-win64/chrome.exe") for p in pats)
+    assert any("Google Chrome for Testing.app" in p for p in pats)
+    assert env.find_chrome() is None or env.find_chrome().startswith("/opt/pw-browsers")
+    cft = tmp_path / ".cache" / "ms-playwright" / "chromium-1234" / "chrome-linux64" / "chrome"
+    cft.parent.mkdir(parents=True)
+    cft.write_text("")
+    found = env.find_chrome()
+    assert found == str(cft) or found.startswith("/opt/pw-browsers")   # /opt/pw-browsers ranks first
+
+
 def test_find_ffprobe_env(monkeypatch, tmp_path):
     monkeypatch.setenv("DEMO_SMOKE_FFPROBE", str(tmp_path / "nope"))
     assert env.find_ffprobe() is None
@@ -157,15 +177,36 @@ def test_detect_never_crashes(monkeypatch, tmp_path, unreachable_url):
 
 
 def test_hf_cache_dir_precedence(monkeypatch, tmp_path):
-    for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME"):
+    for k in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "HF_HOME", "XDG_CACHE_HOME"):
         monkeypatch.delenv(k, raising=False)
     assert env.hf_cache_dir() == str(Path.home() / ".cache" / "huggingface" / "hub")
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))              # like huggingface_hub
+    assert env.hf_cache_dir() == str(tmp_path / "xdg" / "huggingface" / "hub")
+    monkeypatch.setenv("MYBASE", str(tmp_path))
+    monkeypatch.setenv("HF_HOME", "$MYBASE/expanded")                         # $VAR expanded
+    assert env.hf_cache_dir() == str(tmp_path / "expanded" / "hub")
     monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))
     assert env.hf_cache_dir() == str(tmp_path / "hf" / "hub")
     monkeypatch.setenv("HUGGINGFACE_HUB_CACHE", str(tmp_path / "legacy"))
     assert env.hf_cache_dir() == str(tmp_path / "legacy")
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
     assert env.hf_cache_dir() == str(tmp_path / "hub")
+
+
+def fill_snapshot(cache: Path, backend: str, commit: str = "abc", skip: str | None = None) -> Path:
+    """A huggingface_hub-shaped cache entry for ``backend`` with every weight file (minus ``skip``)."""
+    repo = cache / ("models--" + env.HF_REPOS[backend].replace("/", "--"))
+    (repo / "refs").mkdir(parents=True, exist_ok=True)
+    (repo / "refs" / "main").write_text(commit + "\n")
+    snap = repo / "snapshots" / commit
+    snap.mkdir(parents=True, exist_ok=True)
+    (repo / "blobs").mkdir(exist_ok=True)
+    for f in env.HF_WEIGHT_FILES[backend]:
+        if f != skip and not (snap / f).is_symlink():
+            blob = repo / "blobs" / f"sha-{f}"
+            blob.write_bytes(b"x")
+            (snap / f).symlink_to(blob)         # snapshots hold symlinks into blobs/
+    return repo
 
 
 def test_hf_weights_present(tmp_path):
@@ -176,7 +217,20 @@ def test_hf_weights_present(tmp_path):
     (repo / "refs" / "main").write_text("abc")
     assert env.hf_weights_present(str(cache))["turbo"] is False      # ref without a snapshot
     (repo / "snapshots" / "abc").mkdir(parents=True)
+    assert env.hf_weights_present(str(cache))["turbo"] is False      # interrupted prefetch: empty snapshot dir
+    fill_snapshot(cache, "turbo", skip="s3gen_meanflow.safetensors")
+    assert env.hf_weights_present(str(cache))["turbo"] is False      # one weight file still missing
+    fill_snapshot(cache, "turbo")
     assert env.hf_weights_present(str(cache)) == {"turbo": True, "nano": False, "classic": False}
+    (repo / "blobs" / "deadbeef.incomplete").write_bytes(b"")
+    assert env.hf_weights_present(str(cache))["turbo"] is False      # a download is still in flight
+    (repo / "blobs" / "deadbeef.incomplete").unlink()
+    fill_snapshot(cache, "nano")
+    fill_snapshot(cache, "classic")
+    assert env.hf_weights_present(str(cache)) == {"turbo": True, "nano": True, "classic": True}
+    # the file lists are what chatterbox's from_local actually loads
+    assert "t3_nano_v1.safetensors" in env.HF_WEIGHT_FILES["nano"]
+    assert "conds.pt" in env.HF_WEIGHT_FILES["classic"]
 
 
 def test_chatterbox_nano_supported_scans_source(tmp_path, monkeypatch):
@@ -185,7 +239,8 @@ def test_chatterbox_nano_supported_scans_source(tmp_path, monkeypatch):
 
     site = tmp_path / "site"
     (site / "chatterbox").mkdir(parents=True)
-    (site / "chatterbox" / "__init__.py").write_text("")
+    # the real __init__ imports huggingface_hub (which freezes HF_HUB_OFFLINE): the probe must not run it
+    (site / "chatterbox" / "__init__.py").write_text("raise RuntimeError('chatterbox/__init__.py was imported')\n")
     turbo = site / "chatterbox" / "tts_turbo.py"
     turbo.write_text("class ChatterboxTurboTTS:\n    @classmethod\n    def from_pretrained(cls, device):\n        pass\n")
     for name in [m for m in sys.modules if m == "chatterbox" or m.startswith("chatterbox.")]:
@@ -197,6 +252,13 @@ def test_chatterbox_nano_supported_scans_source(tmp_path, monkeypatch):
     turbo.write_text("NANO_REPO_ID = 'ResembleAI/chatterbox-nano'\nclass ChatterboxTurboTTS:\n"
                      "    @classmethod\n    def from_pretrained(cls, device, nano=False):\n        pass\n")
     assert env.chatterbox_nano_supported() is True                   # git master shape
+    assert "chatterbox" not in sys.modules
+    from demo_smoke import tts
+    monkeypatch.setattr(env, "torch_device", lambda: "cpu")
+    assert tts.resolve_backend("auto") == "nano"                     # doctor's tts_auto probe: import-free too
+    assert "chatterbox" not in sys.modules
+    turbo.unlink()
+    assert env.chatterbox_nano_supported() is False                  # package without tts_turbo.py
 
 
 def test_detect_reports_tts_auto_and_readiness(tmp_path, monkeypatch):
@@ -207,12 +269,10 @@ def test_detect_reports_tts_auto_and_readiness(tmp_path, monkeypatch):
     rep = env.detect()
     assert rep["tts_auto"] == "turbo" and rep["tts_ready"] is False
     assert any("prefetch --tts turbo" in h for h in rep["hints"])
-    repo = tmp_path / "hub" / "models--ResembleAI--chatterbox-turbo"
-    (repo / "refs").mkdir(parents=True)
-    (repo / "refs" / "main").write_text("x")
-    (repo / "snapshots" / "x").mkdir(parents=True)
+    fill_snapshot(tmp_path / "hub", "turbo", commit="x")
     rep = env.detect()
     assert rep["tts_ready"] is True and not any("prefetch" in h for h in rep["hints"])
+    assert "opencode" in rep
 
 
 def test_detect_with_fake_llm(fake_llm):

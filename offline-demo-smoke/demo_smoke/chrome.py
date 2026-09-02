@@ -71,8 +71,16 @@ def _candidate_paths() -> list[str]:
         found = shutil.which(name)
         if found:
             candidates.append(found)
-    candidates += sorted(glob.glob("/opt/pw-browsers/chromium-*/chrome-linux/chrome"), reverse=True)
-    candidates += sorted(glob.glob(str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux/chrome")), reverse=True)
+    try:
+        # legacy + Chrome-for-Testing layouts
+        from demo_smoke.env import playwright_chrome_patterns
+    except ImportError:
+        patterns = ["/opt/pw-browsers/chromium-*/chrome-linux*/chrome",
+                    str(Path.home() / ".cache/ms-playwright/chromium-*/chrome-linux*/chrome")]
+    else:
+        patterns = playwright_chrome_patterns()
+    for pat in patterns:
+        candidates += sorted(glob.glob(pat), reverse=True)
     return candidates
 
 
@@ -309,7 +317,9 @@ class ChromeSession:
                     "windowId": win["windowId"],
                     "bounds": {"width": int(bounds["width"]) + dx, "height": int(bounds["height"]) + dy},
                 })
-                self.ui_insets = {"x": self.ui_insets["x"] + dx, "y": self.ui_insets["y"] + dy}
+                # Chrome has no UI left of the page: a width change moves nothing horizontally,
+                # only the height delta is browser UI above the page area.
+                self.ui_insets = {"x": self.ui_insets["x"], "y": self.ui_insets["y"] + dy}
                 self.page.wait_for_timeout(200)
             else:
                 log.debug("window did not settle on the %sx%s viewport after %s rounds", want_w, want_h, rounds)
@@ -406,6 +416,25 @@ class ChromeSession:
         self.close()
 
 
+def _fresh_profile_dir(out: Path, port: int) -> Path:
+    """``<out>/chrome-profile``, guaranteed empty.  A leftover that cannot be removed
+    (a Chrome from an earlier attempt still holding files) must not be reused silently:
+    its cookies/localStorage would change what the next attempt tests, so fall back to
+    a unique ``chrome-profile-<port>`` and say so in the log."""
+    profile_dir = out / "chrome-profile"
+    if profile_dir.exists():
+        shutil.rmtree(profile_dir, ignore_errors=True)
+    if profile_dir.exists():
+        fallback = out / f"chrome-profile-{port}"
+        log.warning("could not remove the previous Chrome profile %s; using a fresh %s instead",
+                    profile_dir, fallback)
+        profile_dir = fallback
+        if profile_dir.exists():
+            shutil.rmtree(profile_dir, ignore_errors=True)
+    profile_dir.mkdir(parents=True, exist_ok=True)
+    return profile_dir
+
+
 def launch(out: Path, viewport: dict, headless: bool = False) -> ChromeSession:
     """Start Chrome with a fresh profile under ``<out>/chrome-profile`` and attach Playwright.
 
@@ -421,16 +450,13 @@ def launch(out: Path, viewport: dict, headless: bool = False) -> ChromeSession:
     if not Path(chrome).is_file():
         raise ChromeError(f"Chrome binary does not exist: {chrome}")
 
-    profile_dir = out / "chrome-profile"
-    if profile_dir.exists():
-        shutil.rmtree(profile_dir, ignore_errors=True)
-    profile_dir.mkdir(parents=True, exist_ok=True)
+    port = _free_port()
+    profile_dir = _fresh_profile_dir(out, port)
     logs = out / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / "chrome.log"
     log_file = open(log_path, "ab")  # noqa: SIM115 - handed to Popen, closed in close()
 
-    port = _free_port()
     args = chrome_args(chrome, port, profile_dir, viewport, headless)
     env = dict(os.environ)
     env.setdefault("LANG", "C.UTF-8")

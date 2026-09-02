@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 import threading
 import time
@@ -16,9 +15,8 @@ KIT = Path(__file__).resolve().parents[1]
 if str(KIT) not in sys.path:
     sys.path.insert(0, str(KIT))
 
-_PW_CHROME = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
-if "DEMO_SMOKE_CHROME" not in os.environ and Path(_PW_CHROME).is_file():
-    os.environ["DEMO_SMOKE_CHROME"] = _PW_CHROME
+# Chrome discovery is env.find_chrome() (DEMO_SMOKE_CHROME, install paths, PATH, Playwright caches
+# such as /opt/pw-browsers); nothing machine-specific is hard-coded here.
 
 EXAMPLE_SCENARIO = KIT / "scenarios" / "example-chat-with-manuals.json"
 

@@ -137,19 +137,31 @@ def find_chrome() -> str | None:
         found = shutil.which(name)
         if found:
             return found
-    patterns = [
-        "/opt/pw-browsers/chromium-*/chrome-linux/chrome",
-        str(Path.home() / ".cache" / "ms-playwright" / "chromium-*" / "chrome-linux" / "chrome"),
-        str(Path.home() / "Library" / "Caches" / "ms-playwright" / "chromium-*"
-            / "chrome-mac" / "Chromium.app" / "Contents" / "MacOS" / "Chromium"),
-        str(Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright" / "chromium-*"
-            / "chrome-win" / "chrome.exe"),
-    ]
-    for pat in patterns:
+    for pat in playwright_chrome_patterns():
         hits = sorted(glob.glob(pat))
         if hits:
             return hits[-1]
     return None
+
+
+def playwright_chrome_patterns() -> list[str]:
+    """Glob patterns for a Chromium in a Playwright browser cache: the legacy
+    ``chrome-linux``/``chrome-mac``/``chrome-win`` layout and the Chrome-for-Testing
+    layout (``chrome-linux64``, ``chrome-mac-*``, ``chrome-win64``) that Playwright
+    >= 1.5x ships."""
+    caches = [Path("/opt/pw-browsers"), Path.home() / ".cache" / "ms-playwright",
+              Path.home() / "Library" / "Caches" / "ms-playwright",
+              Path(os.environ.get("LOCALAPPDATA", "")) / "ms-playwright"]
+    cft_mac = Path("Google Chrome for Testing.app") / "Contents" / "MacOS" / "Google Chrome for Testing"
+    layouts = [
+        Path("chrome-linux") / "chrome",
+        Path("chrome-linux64") / "chrome",
+        Path("chrome-mac") / "Chromium.app" / "Contents" / "MacOS" / "Chromium",
+        Path("chrome-mac-*") / cft_mac,
+        Path("chrome-win") / "chrome.exe",
+        Path("chrome-win64") / "chrome.exe",
+    ]
+    return [str(cache / "chromium-*" / layout) for cache in caches for layout in layouts]
 
 
 # --------------------------------------------------------------------------- torch
@@ -186,31 +198,46 @@ def chatterbox_nano_supported() -> bool | None:
     have no Nano (``ChatterboxTurboTTS.from_pretrained(device)`` only); the git
     master adds ``nano=True``.  Detected by scanning the module source so that
     doctor stays cheap (importing chatterbox pulls in torch + transformers).
+
+    Only the *top-level* package is located: ``find_spec("chatterbox.tts_turbo")``
+    would import ``chatterbox/__init__.py`` (and with it huggingface_hub, which
+    freezes ``HF_HUB_OFFLINE`` at import time), so the submodule is read as a
+    file from the package directory instead.
     """
     try:
-        spec = importlib.util.find_spec("chatterbox.tts_turbo")
+        spec = importlib.util.find_spec("chatterbox")
     except (ImportError, ValueError, AttributeError):
         return None
-    if spec is None or not spec.origin:
+    if spec is None:
         return None
-    try:
-        src = Path(spec.origin).read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return False
-    return bool(re.search(r"\bnano\b", src, re.IGNORECASE))
+    for loc in list(spec.submodule_search_locations or []):
+        turbo = Path(loc) / "tts_turbo.py"
+        if turbo.is_file():
+            try:
+                src = turbo.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return False
+            return bool(re.search(r"\bnano\b", src, re.IGNORECASE))
+    return False
 
 
 def hf_cache_dir() -> str:
     """The Hugging Face hub cache, resolved like huggingface_hub does:
-    ``HF_HUB_CACHE`` -> ``HUGGINGFACE_HUB_CACHE`` -> ``$HF_HOME/hub`` -> ``~/.cache/huggingface/hub``."""
+    ``HF_HUB_CACHE`` -> ``HUGGINGFACE_HUB_CACHE`` -> ``$HF_HOME/hub`` ->
+    ``$XDG_CACHE_HOME/huggingface/hub`` -> ``~/.cache/huggingface/hub`` (``~`` and
+    ``$VAR`` expanded, like huggingface_hub.constants)."""
+    def _expand(v: str) -> str:
+        return os.path.expandvars(os.path.expanduser(v))
+
     for key in ("HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"):
         val = os.environ.get(key)
         if val:
-            return str(Path(val).expanduser())
+            return str(Path(_expand(val)))
     home = os.environ.get("HF_HOME")
-    if home:
-        return str(Path(home).expanduser() / "hub")
-    return str(Path.home() / ".cache" / "huggingface" / "hub")
+    if not home:
+        xdg = os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
+        home = os.path.join(xdg, "huggingface")
+    return str(Path(_expand(home)) / "hub")
 
 
 # Hugging Face repos each Chatterbox backend downloads (see chatterbox/tts*.py).
@@ -221,18 +248,47 @@ HF_REPOS = {
 }
 
 
-def hf_weights_present(cache: str | None = None) -> dict:
-    """{backend: bool} - is a snapshot of that backend's repo in the HF cache?
+# Files each backend's ``from_local`` actually loads (chatterbox tts_turbo.py / tts.py,
+# identical in PyPI 0.1.7 and the pinned git commit).  ``conds.pt`` is optional for
+# turbo/nano but downloaded explicitly by classic.
+HF_WEIGHT_FILES = {
+    "turbo": ("ve.safetensors", "t3_turbo_v1.safetensors", "s3gen_meanflow.safetensors", "tokenizer.json"),
+    "nano": ("ve.safetensors", "t3_nano_v1.safetensors", "s3gen_meanflow.safetensors", "tokenizer.json"),
+    "classic": ("ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"),
+}
 
-    huggingface_hub stores ``models--<org>--<name>/refs/main`` next to the
-    ``snapshots/`` directory once a revision has been downloaded.
+
+def hf_snapshot_ready(repo_dir: Path, files: tuple[str, ...]) -> bool:
+    """Is the ``refs/main`` snapshot of ``repo_dir`` complete?
+
+    huggingface_hub writes ``refs/main`` and creates ``snapshots/<commit>/``
+    *before* downloading, and files land there one by one (``blobs/*.incomplete``
+    while in flight), so an interrupted prefetch leaves a ref with missing
+    files.  Ready means: the ref names a snapshot that holds every file the
+    backend loads and nothing is still ``.incomplete``.
     """
+    ref = repo_dir / "refs" / "main"
+    try:
+        commit = ref.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not commit:
+        return False
+    snap = repo_dir / "snapshots" / commit
+    if not snap.is_dir():
+        return False
+    if any((repo_dir / "blobs").glob("*.incomplete")):
+        return False
+    return all((snap / f).is_file() for f in files)
+
+
+def hf_weights_present(cache: str | None = None) -> dict:
+    """{backend: bool} - is a complete snapshot of that backend's repo in the HF cache?"""
     root = Path(cache or hf_cache_dir())
     found = {}
     for backend, repo in HF_REPOS.items():
         d = root / ("models--" + repo.replace("/", "--"))
-        found[backend] = (d / "refs" / "main").is_file() and any((d / "snapshots").glob("*")) \
-            if d.is_dir() else False
+        found[backend] = hf_snapshot_ready(d, HF_WEIGHT_FILES[backend]) if d.is_dir() else False
     return found
 
 
@@ -260,6 +316,7 @@ def detect(base_url: str | None = None, model: str | None = None,
             "TRANSFORMERS_OFFLINE": os.environ.get("TRANSFORMERS_OFFLINE"),
         },
         "llm": None,
+        "opencode": shutil.which("opencode"),
         "hints": hints,
     }
     try:
@@ -286,6 +343,9 @@ def detect(base_url: str | None = None, model: str | None = None,
                 "Chrome/Chromium not found: install Google Chrome/Chromium, "
                 "or set DEMO_SMOKE_CHROME=/path/to/chrome"
             )
+    if not rep["opencode"]:
+        hints.append("OpenCode not on PATH (only the agent path needs it): install it while online "
+                     "(https://opencode.ai), then run `opencode --version` once")
     rep["torch_device"] = torch_device()
     rep["chatterbox"] = chatterbox_importable()
     rep["chatterbox_nano"] = chatterbox_nano_supported() if rep["chatterbox"] else None

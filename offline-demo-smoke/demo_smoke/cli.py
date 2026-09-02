@@ -1,7 +1,7 @@
 """argparse front end: ``python -m demo_smoke <cmd> ...``.
 
 Exit codes: 0 ok, 2 feature failed (smoke FAIL / failed checks), 3 pipeline or
-tooling error, 4 bad input.  Every command prints one summary line to stdout
+tooling error, 4 bad input, 130 interrupted (Ctrl-C).  Every command prints one summary line to stdout
 and writes ``<out>/logs/<cmd>.json``.  Heavy modules (chrome, drive, capture,
 edit, verify, chatterbox) are imported lazily so ``doctor``/``narrate-*`` work
 without them.
@@ -130,7 +130,6 @@ def cmd_doctor(args) -> int:
     env = _mod("env")
     paths = Paths(args.out)
     rep = env.detect(args.base_url, args.model, timeout=args.timeout)
-    _log(paths, "doctor", rep)
     llm = rep.get("llm") or {}
     tc = llm.get("tool_call") or {}
     bits = [
@@ -146,11 +145,17 @@ def cmd_doctor(args) -> int:
         bits.append(f"llm={'reachable' if llm.get('reachable') else 'UNREACHABLE'}")
         if args.model and tc:
             bits.append(f"tool_call={'PASS' if tc.get('pass') else 'FAIL'}")
-    ok = bool(rep["ffmpeg"] and rep["chrome"])
+    bits.append(f"opencode={'ok' if rep.get('opencode') else 'MISSING'}")
+    problems = [k for k in ("ffmpeg", "chrome") if not rep.get(k)]
     if args.base_url and not llm.get("reachable"):
-        ok = False
+        problems.append("llm unreachable")
     if args.model and tc and not tc.get("pass"):
-        ok = False
+        problems.append("tool_call FAIL")
+    ok = not problems
+    if not ok:   # contract: every exit-3 log carries "error" and "exit_code" (plus the report)
+        rep["error"] = "doctor: PROBLEMS " + ", ".join(problems)
+        rep["exit_code"] = EXIT_ERROR
+    _log(paths, "doctor", rep)
     _say(f"doctor: {'ok' if ok else 'PROBLEMS'} " + " ".join(bits)
          + f" (details: {paths.logs / 'doctor.json'})")
     for h in rep.get("hints", []):
@@ -162,9 +167,11 @@ def cmd_check_model(args) -> int:
     llm = _mod("llm")
     paths = Paths(args.out)
     if not llm.reachable(args.base_url):
+        msg = f"LLM endpoint not reachable at {args.base_url} (is the server running?)"
         _log(paths, "check-model", {"pass": False, "detail": "endpoint unreachable",
-                                    "base_url": args.base_url, "model": args.model})
-        _err(f"LLM endpoint not reachable at {args.base_url} (is the server running?)")
+                                    "base_url": args.base_url, "model": args.model,
+                                    "error": f"check-model: {msg}", "exit_code": EXIT_ERROR})
+        _err(msg)
         return EXIT_ERROR
     res = llm.probe_tool_call(args.base_url, args.model, timeout=args.timeout)
     res.update({"base_url": args.base_url, "model": args.model})
@@ -195,6 +202,7 @@ def cmd_prefetch(args) -> int:
 def cmd_voice_check(args) -> int:
     tts = _mod("tts")
     paths = Paths(args.out)
+    tts.set_offline_env(args.online)   # before anything can import chatterbox / huggingface_hub
     backend = tts.resolve_backend(args.tts)
     ref = Path(args.ref) if args.ref else None
     if ref is not None and not ref.is_file():
@@ -258,24 +266,42 @@ def cmd_narrate_validate(args) -> int:
     if args.max_seconds:
         scen["max_length_seconds"] = args.max_seconds
     p = paths.audio / "narration.json"
-    narr = _read_json(p, "run narrate-template or narrate-llm first")
+    budget = narration.word_budget(scen)
+    if not p.is_file():
+        raise PipelineError(f"{p} not found: run narrate-template or narrate-llm first")
+    try:
+        narr = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        # The likeliest small-model mistake (code fence, trailing comma, prose around the
+        # object): treat it like any other invalid narration so the fix-once / template path applies.
+        errors = [f"not valid JSON: {e}"]
+        _log(paths, "narrate-validate", {"path": str(p), "valid": False, "errors": errors, "words": 0,
+                                         "budget": budget, "error": f"narrate-validate: INVALID {p}: {errors[0]}",
+                                         "exit_code": EXIT_BAD_INPUT})
+        _say(f"narrate-validate: INVALID {p}: {errors[0]}")
+        return EXIT_BAD_INPUT
     errors = narration.validate(narr, scen)
-    total = sum(narration.words(s.get("text", "")) for s in narr.get("steps", [])
-                if isinstance(s, dict)) \
-        + narration.words(narr.get("intro", "")) + narration.words(narr.get("outro", ""))
-    _log(paths, "narrate-validate", {"path": str(p), "valid": not errors, "errors": errors,
-                                     "words": total, "budget": narration.word_budget(scen)})
+    total = 0
+    if isinstance(narr, dict):
+        total = sum(narration.words(s.get("text", "")) for s in narr.get("steps", [])
+                    if isinstance(s, dict)) \
+            + narration.words(narr.get("intro", "")) + narration.words(narr.get("outro", ""))
+    log = {"path": str(p), "valid": not errors, "errors": errors, "words": total, "budget": budget}
+    if errors:
+        log["error"] = f"narrate-validate: INVALID {p}: " + "; ".join(errors)
+        log["exit_code"] = EXIT_BAD_INPUT
+    _log(paths, "narrate-validate", log)
     if errors:
         _say(f"narrate-validate: INVALID {p}: " + "; ".join(errors))
         return EXIT_BAD_INPUT
-    _say(f"narrate-validate: ok {total}/{narration.word_budget(scen)} words, "
-         f"{len(narr['steps'])} steps")
+    _say(f"narrate-validate: ok {total}/{budget} words, {len(narr['steps'])} steps")
     return EXIT_OK
 
 
 def cmd_synth(args) -> int:
     tts = _mod("tts")
     paths = Paths(args.out)
+    tts.set_offline_env(args.online)   # before anything can import chatterbox / huggingface_hub
     backend = tts.resolve_backend(args.tts)
     ref = Path(args.ref) if args.ref else None
     if ref is not None and not ref.is_file():
@@ -329,6 +355,10 @@ def cmd_run(args) -> int:
     env = _mod("env")
     report = _mod("report")
     paths = Paths(args.out)
+    _mod("tts").set_offline_env(args.online)   # before doctor/synth can import chatterbox
+    if args.narration == "llm" and not (args.base_url and args.model):
+        return _bad_input(paths, "run", "--narration llm needs --base-url and --model "
+                                        "(or DEMO_SMOKE_BASE_URL / DEMO_SMOKE_MODEL)")
     scen = _load_scenario(args.scenario, paths, check_files=True)
     dry = markers = ver = None
     env_rep: dict = {}
@@ -372,8 +402,6 @@ def cmd_run(args) -> int:
         narration = _mod("narration")
         note = ""
         if source == "llm":
-            if not args.base_url or not args.model:
-                raise PipelineError("--narration llm needs --base-url and --model")
             narr, source, note = narration.from_llm(scen, args.base_url, args.model, timeout=args.timeout)
         else:
             narr = narration.template(scen)

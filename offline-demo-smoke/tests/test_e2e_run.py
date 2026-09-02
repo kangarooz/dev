@@ -24,22 +24,20 @@ KIT = Path(__file__).resolve().parents[1]
 APP_DIR = KIT / "tests" / "fixtures" / "app"
 SCEN_DIR = KIT / "tests" / "fixtures" / "scenarios"
 FILES_DIR = KIT / "tests" / "fixtures" / "files"
-CHROME_DEFAULT = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 TIMEOUT_S = 600
 
 
 def _env() -> dict:
     env = dict(os.environ)
-    if "DEMO_SMOKE_CHROME" not in env and Path(CHROME_DEFAULT).exists():
-        env["DEMO_SMOKE_CHROME"] = CHROME_DEFAULT
+    found = chrome.find_chrome()
+    if "DEMO_SMOKE_CHROME" not in env and found:
+        env["DEMO_SMOKE_CHROME"] = found      # the subprocess uses the same discovery; pin it anyway
     env["PYTHONPATH"] = str(KIT) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
 
 def _need_chrome() -> None:
-    if "DEMO_SMOKE_CHROME" not in os.environ and Path(CHROME_DEFAULT).exists():
-        os.environ["DEMO_SMOKE_CHROME"] = CHROME_DEFAULT
     if not chrome.find_chrome():
         pytest.skip("no Chrome binary available (set DEMO_SMOKE_CHROME)")
 

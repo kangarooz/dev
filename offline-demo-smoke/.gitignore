@@ -3,7 +3,7 @@ demo-output/
 /out/
 /out-*/
 /tmp-*/
-chrome-profile/
+chrome-profile*/
 
 # python
 __pycache__/

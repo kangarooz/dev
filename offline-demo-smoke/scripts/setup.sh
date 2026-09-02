@@ -103,7 +103,8 @@ if [ "$WITH_TTS" = 1 ]; then
   fi
   if [ -z "$TORCH_INDEX" ]; then
     case "$TORCH" in
-      cuda) TORCH_INDEX="https://download.pytorch.org/whl/cu126" ;;
+      cuda) [ "$OS" != Darwin ] || die "no CUDA torch wheels for macOS; use --torch cpu (MPS is in the default PyPI wheel)"
+            TORCH_INDEX="https://download.pytorch.org/whl/cu126" ;;
       rocm) [ "$OS" = Linux ] || die "ROCm torch wheels exist for Linux only; use --torch cpu"
             TORCH_INDEX="https://download.pytorch.org/whl/rocm6.2.4" ;;
       cpu)  [ "$OS" = Darwin ] || TORCH_INDEX="https://download.pytorch.org/whl/cpu" ;;
@@ -151,8 +152,11 @@ cat <<MSG
    and its login reads DEMO_USER / DEMO_PASS; copy your reference clip into the kit, e.g. voice/ref.wav):
    source .venv/bin/activate
    python -m demo_smoke voice-check --ref voice/ref.wav
-   DEMO_USER=... DEMO_PASS=... python -m demo_smoke run scenarios/example-chat-with-manuals.json --out demo-output/chat-with-manuals --narration template --ref voice/ref.wav
-   DEMO_USER=... DEMO_PASS=... opencode run --agent demo-smoke --auto --command smoke "scenarios/example-chat-with-manuals.json demo-output/chat-with-manuals"
+   export DEMO_USER=... DEMO_PASS=...
+   python -m demo_smoke run scenarios/example-chat-with-manuals.json --out demo-output/chat-with-manuals --narration template --ref voice/ref.wav
+   The agent path needs OpenCode installed while online (https://opencode.ai; \`opencode --version\`), then, offline:
+   export OPENCODE_DISABLE_MODELS_FETCH=1 OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=1200000
+   opencode run --agent demo-smoke --auto --command smoke "scenarios/example-chat-with-manuals.json demo-output/chat-with-manuals"
    No app yet? Try the bundled mock app first: see README "Try it on the bundled mock app".
 MSG
 exit "$rc"

@@ -26,8 +26,9 @@ narration text. Everything else is deterministic Python.
 |---|---|
 | Python **3.11** (3.10-3.13 work) | 3.11 recommended: `chatterbox-tts` pins `torch==2.6.0`, which has wheels for 3.9-3.13 only (no 3.14) and none for Intel Macs; 3.11 is what Resemble tests on. |
 | Google Chrome (or Chromium) | Driven over CDP. Not bundled. Point `DEMO_SMOKE_CHROME` at the binary if it is somewhere unusual. |
-| ffmpeg | Optional. `imageio-ffmpeg` bundles a static build (libx264, aac, loudnorm). A system `ffmpeg` on PATH is used first if present. |
+| ffmpeg | Optional. `imageio-ffmpeg` bundles a static build (libx264, aac, loudnorm). A system `ffmpeg` on PATH is used first if present; 4.2 or newer is enough. |
 | A local LLM server | Only for the OpenCode agent path or `--narration llm`: Ollama (default), llama.cpp `llama-server`, or LM Studio. Not needed for the no-LLM path. |
+| OpenCode | Only for the agent path (`opencode run ...`, `/smoke`). Install it while online (see below); `doctor` prints `opencode=ok|MISSING`. |
 | A reference clip | 30-90 s WAV of clean, single-speaker speech, no music, speech starting within the first second. Chatterbox conditions on roughly the first 10 s, so the opening must be good. Only for voice cloning; `--tts tone` needs nothing. Keep it inside the kit directory (e.g. `voice/ref.wav`, `*.wav` is gitignored) so the OpenCode agent can read it without a permission prompt. |
 | Disk / GPU | Chatterbox Turbo weights ~2 GB; Nano ~1 GB. GPU optional (see TTS choice). Intel Macs: no torch 2.6.0 wheel, so voice cloning needs Apple Silicon, Linux or Windows (`--tts tone` still works). |
 
@@ -56,18 +57,28 @@ pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.
 pip install -r requirements-tts.txt                          # chatterbox-tts
 python -m demo_smoke prefetch --tts auto                     # caches what --tts auto will use here: turbo on CUDA/ROCm/MPS, nano on CPU (turbo if the build has no nano)
 ollama pull qwen3-coder:30b                                  # only for the agent / --narration llm path
+curl -fsSL https://opencode.ai/install | bash                # only for the agent path (or: npm i -g opencode-ai); the scripts do not install it
+opencode --version                                           # once, while online: confirms the binary works
 python -m demo_smoke doctor --base-url http://localhost:11434/v1 --model qwen3-coder:30b
 ```
 
 ```powershell
+Set-ExecutionPolicy -Scope CurrentUser RemoteSigned          # once; otherwise .venv\Scripts\activate is refused (or use .venv\Scripts\python.exe instead of activating)
 py -3.11 -m venv .venv; .venv\Scripts\activate
 pip install -r requirements.txt
 pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126   # or .../whl/cpu
 pip install -r requirements-tts.txt
 python -m demo_smoke prefetch --tts auto
 ollama pull qwen3-coder:30b
+npm i -g opencode-ai                                         # only for the agent path (see https://opencode.ai for other installers)
+opencode --version
 python -m demo_smoke doctor --base-url http://localhost:11434/v1 --model qwen3-coder:30b
 ```
+
+The setup scripts take more options than shown above: `--python PATH`, `--base-url URL`
+(for the doctor probe), `--no-doctor`, `--torch-index URL` (PowerShell: `-Python`, `-BaseUrl`,
+`-NoDoctor`, `-TorchIndex`, `-TorchVersion`); `bash scripts/setup.sh --help` /
+`Get-Help scripts\setup.ps1 -Detailed` list them.
 
 `prefetch` is the step people forget: Chatterbox downloads its weights on first
 use, and the kit runs with `HF_HUB_OFFLINE=1` by default, so an un-prefetched
@@ -100,7 +111,8 @@ Copy your reference clip into the kit first (e.g. `voice/ref.wav`).
 source .venv/bin/activate
 python -m demo_smoke doctor                   # everything ok/MISSING on one line
 python -m demo_smoke voice-check --ref voice/ref.wav      # listen to demo-output/audio/voice_check.wav
-DEMO_USER=alice DEMO_PASS=secret python -m demo_smoke run scenarios/example-chat-with-manuals.json --out demo-output/chat-with-manuals --ref voice/ref.wav --tts auto --narration template
+export DEMO_USER=alice DEMO_PASS=secret       # credentials live in the environment, never on the kit's command line
+python -m demo_smoke run scenarios/example-chat-with-manuals.json --out demo-output/chat-with-manuals --ref voice/ref.wav --tts auto --narration template
 ```
 
 ```powershell
@@ -112,8 +124,9 @@ python -m demo_smoke run scenarios\example-chat-with-manuals.json --out demo-out
 ```
 
 Every command prints one summary line, writes `<out>/logs/<cmd>.json` (on exit 3
-or 4 only `{"error", "exit_code"}`), and exits 0 ok / 2 feature failed / 3 tooling
-error / 4 bad input. The individual stages (`dryrun`, `narrate-template`,
+or 4 it always holds `error` and `exit_code`; `doctor`, `check-model` and
+`narrate-validate` keep their report next to them), and exits 0 ok / 2 feature failed /
+3 tooling error / 4 bad input / 130 interrupted. The individual stages (`dryrun`, `narrate-template`,
 `narrate-llm`, `narrate-validate`, `synth`, `record`, `edit`, `verify`) can be
 run one at a time; see the CLI table in `ARCHITECTURE.md`.
 
@@ -156,8 +169,10 @@ pytest -q                                # unit + headless browser + one end-to-
 ruff check .
 ```
 
-The browser tests use your installed Chrome/Chromium (`DEMO_SMOKE_CHROME` if it
-is somewhere unusual) and skip when none is found. Torch and Chatterbox are never
+The browser-driving and end-to-end tests use your installed Chrome/Chromium
+(`DEMO_SMOKE_CHROME` if it is somewhere unusual; a Playwright cache under
+`/opt/pw-browsers` or `~/.cache/ms-playwright` is found too) and skip when none is
+found; everything else runs without Chrome. Torch and Chatterbox are never
 needed for the tests; the ML backends are exercised through mocks.
 
 ## Local model choice (OpenCode agent / `--narration llm`)
@@ -212,8 +227,12 @@ python -m demo_smoke prefetch --tts nano
 resolves to on this machine).
 
 Install torch for your accelerator **before** `pip install -r requirements-tts.txt`
-(`chatterbox-tts` 0.1.x pins `torch==2.6.0` / `torchaudio==2.6.0`; the file pins the
-same so pip cannot swap in a different build):
+(`chatterbox-tts` 0.1.7 pins `torch==2.6.0` / `torchaudio==2.6.0` on Python <3.14 and
+`torch>=2.9` on 3.14, which the kit does not support; the file pins `chatterbox-tts==0.1.7`
+and the same torch build so pip cannot swap in a different one). Expect a big install:
+0.1.7 pulls in gradio 6.8 (fastapi, uvicorn, pandas, pillow, ...), transformers 5.2,
+diffusers, librosa and friends, a few GB and several minutes; on Python <3.13 it also
+downgrades numpy to 1.x, which is expected.
 
 ```bash
 # NVIDIA CUDA 12.x
@@ -241,7 +260,12 @@ pip install torch==2.6.0 torchaudio==2.6.0
   scaling are compensated, so the capture is exactly the viewport). Needs a real
   display, captures whatever is on it, and on macOS needs Screen Recording
   permission for your terminal (the main display is recorded; set
-  `DEMO_SMOKE_SCREEN_INDEX=1` for a second display). Use it only when the demo
+  `DEMO_SMOKE_SCREEN_INDEX=1` for a second display). The display must be larger
+  than the viewport plus Chrome's tab strip and toolbar (about 90 px): the default
+  1920x1080 viewport does not fit a 1080p screen, so use a smaller `viewport` in the
+  scenario or `screencast`. On Linux it is X11 only (`x11grab`): in a Wayland session
+  (default on current GNOME/KDE) it cannot see a native Wayland Chrome window; use
+  `screencast`, or run Chrome under XWayland. Use it only when the demo
   shows something outside the tab (native dialogs, a second window, non-browser apps).
 
 `--headless` runs Chrome with `--headless=new`; combine with `screencast` for
@@ -277,21 +301,29 @@ pinned down in three places:
 - `AGENTS.md` - short rules every session loads.
 
 Non-interactive, from the kit directory (`--command <name>` runs a custom
-command; the message holds its arguments):
+command; the message holds its arguments: scenario, output dir, then optionally
+the word `headless` and/or a reference `.wav`):
 
 ```bash
+export OPENCODE_DISABLE_MODELS_FETCH=1                          # no catalog refresh from models.opencode.ai
+export OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=1200000    # CPU synth / a 90 s recording outlive the default bash timeout
+export DEMO_USER=alice DEMO_PASS=secret                         # before starting opencode; the agent never puts them on a command line
 opencode run --agent demo-smoke --auto --command smoke "scenarios/example-chat-with-manuals.json demo-output/chat-with-manuals"
+opencode run --agent demo-smoke --auto --command smoke "scenarios/x.json demo-output/x headless voice/ref.wav"
 opencode run --agent demo-smoke --auto --model ollama/devstral:24b --command smoke "scenarios/x.json demo-output/x"
 opencode run --agent demo-smoke --auto --command voice-check "voice/ref.wav"
 opencode run --agent demo-smoke --auto --command narrate "scenarios/x.json demo-output/x"
 ```
 
+(PowerShell: `$env:OPENCODE_DISABLE_MODELS_FETCH=1`, `$env:DEMO_USER='alice'`, and so on.)
+
 `--auto` approves everything that is not explicitly denied (the deny list still
-holds: no web, no `rm -rf`, no `git push`, no edits outside the allowed paths).
-Without `--auto`, anything outside the allow list prompts you, and in
-`opencode run` nobody is there to answer, so keep `--auto` for non-interactive use.
-The example scenario needs the app and `DEMO_USER` / `DEMO_PASS` in the
-environment, exactly like the CLI run above.
+holds: no web, no `prefetch`, no `--online`, no `rm -rf`, no `git push`, no edits
+outside the allowed paths, and `doom_loop` is denied so a third identical tool call
+is blocked instead of approved). Without `--auto`, anything outside the allow list
+prompts you, and in `opencode run` nobody is there to answer, so keep `--auto` for
+non-interactive use. The example scenario needs the app and `DEMO_USER` /
+`DEMO_PASS` exported in the shell that starts `opencode`, exactly like the CLI run above.
 
 Interactive TUI: run `opencode` in the kit directory. The `demo-smoke` agent is
 the default (Tab cycles agents); type `/smoke scenarios/x.json demo-output/x` and
@@ -301,8 +333,9 @@ prints the setup command for you to run; the agent never installs anything.
 
 The playbook in the agent is written for small models: exact commands, one
 tool call per step, read the JSON after each command, stop on exit code 2 or 3,
-never write code. A 30B MoE model finishes a four-step scenario in about a
-dozen tool calls.
+never write code. The mandated sequence is about 16-20 tool calls (8 commands,
+a log read after each, the narration write and the venv check); the agent's
+`steps: 40` leaves room for one narration retry and the report.
 
 ## Writing a scenario
 
@@ -341,7 +374,7 @@ which step and which expectation failed, with console errors.
   report.md, result.json            verdict, step table, checks, artifact paths, env (written by `run` only)
   final/<slug>.mp4                  the deliverable (H.264 + AAC, faststart)
   final/thumb-10.png, -50, -90      thumbnails
-  logs/<cmd>.json                   machine-readable result of every command ({"error", "exit_code"} on exit 3/4)
+  logs/<cmd>.json                   machine-readable result of every command (always with "error" and "exit_code" on exit 3/4)
   logs/scenario.json                the loaded scenario (used by edit/verify/narrate-validate without SCENARIO)
   logs/step-NN-<id>.png             screenshot after each dryrun step; logs/record-NN-<id>.png during record
   logs/<name>.png                   extra `screenshot` actions
@@ -350,7 +383,9 @@ which step and which expectation failed, with console errors.
   logs/dryrun.json, markers.json, edit.json (exact ffmpeg command), edit-filter.txt, verify.json
   logs/chrome.log, ffmpeg-capture.log / screen-capture.log
   audio/narration.json, seg-*.wav, durations.json, synth-stats.json, voice_check.wav
-  raw/capture.mp4                   unedited capture; raw/frames/ + frames.json for the screencast backend
+  raw/capture.mp4                   unedited capture; raw/frames/ + frames.json + frames.txt (ffconcat list) for the screencast backend
+  chrome-profile/                   the fresh Chrome profile of the last launch (a few MB, safe to delete)
+  clips/                            reserved, always empty
 ```
 
 ## Sharing the MP4
@@ -374,8 +409,10 @@ company's video host; the file needs no re-encoding.
 - **`chatterbox` errors offline** (`Cannot reach huggingface.co`, `OfflineModeIsEnabled`,
   missing snapshot): run the `python -m demo_smoke prefetch --tts <the backend named
   in the error>` command the message quotes, while online, once per model. The cache
-  is `HF_HUB_CACHE` if set, else `$HF_HOME/hub` (default `~/.cache/huggingface/hub`);
-  `doctor` prints the path and `tts_ready`. Copy that folder to move it to an offline box.
+  is `HF_HUB_CACHE` if set, else `HUGGINGFACE_HUB_CACHE`, else `$HF_HOME/hub` (default
+  `$XDG_CACHE_HOME/huggingface/hub`, i.e. `~/.cache/huggingface/hub`); `doctor` prints the
+  path and `tts_ready` (yes only when every weight file of the chosen backend is in the
+  snapshot, so an interrupted prefetch shows NO). Copy that folder to move it to an offline box.
   `--online` on `synth`/`voice-check` allows downloads for one run.
 - **`--tts nano` says the installed chatterbox has no Nano model**: PyPI's release
   has none; install the git build (see "TTS model choice") or use `--tts turbo`.
@@ -407,8 +444,10 @@ company's video host; the file needs no re-encoding.
 - Environment variables the CLI reads: `DEMO_SMOKE_CHROME`, `DEMO_SMOKE_FFMPEG`,
   `DEMO_SMOKE_FFPROBE`, `DEMO_SMOKE_BASE_URL` / `DEMO_SMOKE_MODEL` (defaults for
   `--base-url` / `--model`), `DEMO_SMOKE_API_KEY` or `OPENAI_API_KEY` (bearer token
-  for the LLM endpoint), `DEMO_SMOKE_SCREEN_INDEX`, `HF_HUB_CACHE` / `HF_HOME`, and
-  `DEMO_SMOKE_DEBUG=1`, which turns one-line errors back into full tracebacks.
+  for the LLM endpoint), `DEMO_SMOKE_SCREEN_INDEX`, `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` /
+  `HF_HOME` (that order), and `DEMO_SMOKE_DEBUG=1`, which turns one-line errors back into full
+  tracebacks. For OpenCode itself: `OPENCODE_DISABLE_MODELS_FETCH=1` and
+  `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` (see "The OpenCode path").
 
 ## Privacy and consent
 
@@ -417,6 +456,10 @@ company's video host; the file needs no re-encoding.
 - Every WAV Chatterbox produces carries Resemble AI's imperceptible **Perth**
   watermark, which survives into the MP4. Detectable with the `perth` package;
   this is by design and the kit does not remove it.
-- Nothing leaves the machine: no telemetry, OpenCode sharing is disabled in
-  `opencode.json`, and the agent is denied web access. The reference clip,
-  screenshots and recordings stay under `demo-output/` (gitignored).
+- The kit itself sends nothing anywhere: no telemetry, `HF_HUB_OFFLINE=1` is
+  exported before Chatterbox loads, OpenCode sharing and auto-update are disabled in
+  `opencode.json`, and the agent is denied web access, `prefetch` and `--online`.
+  OpenCode does refresh its model catalog from `models.opencode.ai` on start unless
+  `OPENCODE_DISABLE_MODELS_FETCH=1` is set (it is an environment flag, not a config
+  key; the README examples export it). The reference clip, screenshots and
+  recordings stay under `demo-output/` (gitignored).

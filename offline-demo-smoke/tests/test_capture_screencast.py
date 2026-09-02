@@ -16,12 +16,9 @@ from demo_smoke import capture, chrome, drive
 KIT = Path(__file__).resolve().parents[1]
 APP_DIR = KIT / "tests" / "fixtures" / "app"
 SCEN_DIR = KIT / "tests" / "fixtures" / "scenarios"
-CHROME_DEFAULT = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
 
 
 def _env() -> None:
-    if "DEMO_SMOKE_CHROME" not in os.environ and Path(CHROME_DEFAULT).exists():
-        os.environ["DEMO_SMOKE_CHROME"] = CHROME_DEFAULT
     if "DEMO_SMOKE_FFMPEG" not in os.environ:
         import imageio_ffmpeg
 
@@ -167,6 +164,35 @@ def test_concat_list_repeats_last_frame(tmp_path):
     assert "fps=30" in vf[vf.index("-vf") + 1] and vf[vf.index("-crf") + 1] == "18"
 
 
+def test_concat_list_keeps_real_timeline_through_bursts(tmp_path):
+    """Regression: a 1/60 s minimum per frame made bursts of near-simultaneous frames push
+    every later frame behind its real time (0.25 s over 8 s), so the narration led the picture."""
+    session = SimpleNamespace(viewport={"width": 640, "height": 360}, cdp=None, page=None, headless=True)
+    cap = capture.ScreencastCapture(session, tmp_path)
+    frames = [("000000.jpg", 0.05)]
+    t = 0.05
+    for i in range(1, 400):                      # 400 frames: bursts 2 ms apart, then a normal gap
+        t += 0.002 if i % 4 else 0.1
+        frames.append((f"{i:06d}.jpg", t))
+    cap.frames = frames
+    cap.t_stop = t + 0.5
+    text = cap.concat_list()
+    durations = [float(x) for x in re.findall(r"^duration (\S+)$", text, re.MULTILINE)]
+    names = re.findall(r"^file 'frames/(\S+)'$", text, re.MULTILINE)
+    kept = cap.kept_frames()
+    assert len(kept) < len(frames) and kept[0] == frames[0]
+    assert frames[-1][1] - kept[-1][1] < 1.0 / 30 / 2          # only a sub-half-frame tail is dropped
+    assert names[:-1] == [n for n, _ in kept] and names[-1] == names[-2]
+    assert min(durations[:-1]) >= 1.0 / 30 / 2 - 1e-9          # bursts merged, no sub-half-frame entries
+    # cumulative concat time of every kept frame equals its real timestamp; total equals t_stop
+    placed = 0.0
+    for (name, real_t), d in zip(kept, durations):
+        if name != kept[0][0]:
+            assert placed == pytest.approx(real_t, abs=1e-5), name
+        placed += d
+    assert placed == pytest.approx(cap.t_stop, abs=1e-5)
+
+
 # --------------------------------------------------------------------------- browser
 def test_screencast_capture_two_seconds(tmp_path):
     _need_chrome()
@@ -250,7 +276,11 @@ def test_record_writes_capture_and_markers(tmp_path):
     assert markers["device_scale_factor"] >= 1.0 and "y" in markers["ui_insets"]
     assert (tmp_path / "logs" / "record-01-open.png").exists()
     video_s = media_duration(tmp_path / "raw" / "capture.mp4")
-    assert abs(video_s - (markers["end_t"] + 2.0)) <= 0.6
+    # the concat timeline is anchored to real timestamps: no cumulative drift from frame bursts
+    assert abs(video_s - (markers["end_t"] + 2.0)) <= 0.2
+    assert markers["capture_seconds"] == pytest.approx(video_s, abs=0.2)     # capture length, not wall time
+    frames = json.loads((tmp_path / "raw" / "frames.json").read_text(encoding="utf-8"))
+    assert markers["capture_seconds"] == pytest.approx(frames["t_stop"], abs=0.001)
 
 
 def _jpeg_size(path: Path) -> tuple[int, int]:

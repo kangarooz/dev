@@ -10,10 +10,10 @@ Write the narration for this demo, then validate it. Do not run any other pipeli
 Scenario:
 @$1
 
-Dry-run results (only the words inside quotes in the `observed` fields may be spoken; never the selectors, counts or URLs):
+Dry-run results (context only: which steps passed; never speak the selectors, counts, URLs or quoted values in the `observed` fields):
 @$2/logs/dryrun.json
 
-1. If the dry-run results are not shown above, read `$2/logs/dryrun.json`. If that file does not exist, run `python -m demo_smoke dryrun $1 --out $2` first and read it.
-2. Write `$2/audio/narration.json` with the write tool, the whole file at once (never bash, never a heredoc, never the edit tool), following the Narration rules in your instructions (same step ids in the same order, at most 45 words per segment, first person, present tense, mention the step title or a quoted expectation).
+1. Read `$2/logs/dryrun.json` with the read tool now if it is not visible above. If the read fails because the file does not exist, run `python -m demo_smoke dryrun $1 --out $2` once and read it.
+2. Write `$2/audio/narration.json` with the write tool, the whole file at once (never bash, never a heredoc, never the edit tool), following the Narration rules in your instructions (same step ids in the same order, at most 45 words per segment, aim for 30, first person, present tense; each step text rewords the step's `narration` field or its `title`).
 3. Run `python -m demo_smoke narrate-validate $1 --out $2`. On exit code 4 (`narrate-validate: INVALID`), rewrite the whole file once with the write tool, fixing exactly the listed errors, and validate once more. If it is still invalid, run `python -m demo_smoke narrate-template $1 --out $2` and say that the template was used.
 4. Reply with the final narration text per segment and the `narrate-validate:` summary line.

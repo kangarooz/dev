@@ -697,7 +697,8 @@ def record(scenario: dict, out: Path, capture: str, headless: bool, durations: d
     markers = _build_markers(cap.capture_start_epoch or time.time(), steps, outro_t, end_t)
     markers["capture"] = str(video)
     markers["capture_backend"] = capture
-    markers["capture_seconds"] = round(cap.now(), 3)
+    # the capture length, not wall time since t0 (ffmpeg assembly + Chrome shutdown ran in between)
+    markers["capture_seconds"] = round(float(getattr(cap, "t_stop", None) or cap.now()), 3)
     markers["viewport"] = dict(session.viewport)
     markers["capture_bounds"] = dict(getattr(cap, "bounds", None) or {})   # screen backend: page area (DIPs)
     markers["ui_insets"] = dict(getattr(session, "ui_insets", None) or {})

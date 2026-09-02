@@ -197,9 +197,11 @@ def audio_chain(placements: list[dict], total: float) -> list[str]:
         lab = f"a{i}"
         labels.append(f"[{lab}]")
         delay_ms = max(0, round(float(p["t"]) * 1000))
+        # one delay per channel (the stream is stereo after aformat): `adelay=D|D` works on
+        # every ffmpeg 4.x, unlike `all=1`, which only exists from 4.3 on
         lines.append(f"[{p['input']}:a]aresample={SAMPLE_RATE},"
                      f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                     f"adelay={delay_ms}:all=1[{lab}]")
+                     f"adelay={delay_ms}|{delay_ms}[{lab}]")
     bus = _amix_tree(labels, lines)
     lines.append(f"{bus}{LOUDNORM},aresample={SAMPLE_RATE},"
                  f"apad=whole_dur={_f(total)},atrim=end={_f(total)},asetpts=PTS-STARTPTS[aout]")

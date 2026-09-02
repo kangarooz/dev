@@ -10,7 +10,8 @@ over the page area of the Chrome window (window bounds offset by the measured
 browser-UI insets, scaled by the display's backing scale factor and scaled back
 to the viewport size); it needs a real display.
 
-Both expose ``start() -> t0``, ``now() -> seconds since t0``, ``stop() -> Path``.
+Both expose ``start() -> t0``, ``now() -> seconds since t0``, ``stop() -> Path`` and
+record ``t_stop`` (seconds since t0 when the capture ended).
 """
 from __future__ import annotations
 
@@ -188,6 +189,10 @@ class ScreencastCapture:
         except Exception as exc:
             log.debug("handled error", exc_info=True)
             self._started = False
+            try:   # stop()/abort() early-return when not started: detach the handler here
+                cdp.remove_listener("Page.screencastFrame", self._handler)
+            except Exception:
+                log.debug("ignored error", exc_info=True)
             raise CaptureError(f"Page.startScreencast failed: {_one_line(exc)}") from exc
         return self.t0
 
@@ -276,19 +281,42 @@ class ScreencastCapture:
         except OSError:
             pass
 
+    def kept_frames(self) -> list[tuple[str, float]]:
+        """Frames that go into the concat list, anchored to their real timestamps.
+
+        The concat demuxer places entry i at the *sum* of the previous durations,
+        so a minimum per-frame duration would push every later frame behind its
+        real time (bursts of mouse-move/ack frames a few ms apart added ~0.25 s
+        over an 8 s capture, and the narration, placed by the real clock, then led
+        the picture).  Instead, a frame that arrives less than half a frame
+        period after the previously kept one is dropped (its picture is
+        indistinguishable at 30 fps) and every kept frame lasts exactly until
+        the next kept one, so cumulative time equals real time.
+        """
+        min_gap = 1.0 / self.fps / 2
+        kept: list[tuple[str, float]] = []
+        for name, t in self.frames:
+            if kept and t - kept[-1][1] < min_gap:
+                continue
+            kept.append((name, t))
+        return kept
+
     def concat_list(self) -> str:
-        """The ffconcat list: every frame is shown until the next one; the last frame is repeated to the stop time."""
+        """The ffconcat list: every kept frame is shown until the next one; the last frame is held to the stop time."""
         total = max(self.t_stop or 0.0, 0.0)
         lines = ["ffconcat version 1.0"]
-        n = len(self.frames)
-        for i, (name, t) in enumerate(self.frames):
+        kept = self.kept_frames()
+        n = len(kept)
+        for i, (name, t) in enumerate(kept):
             start = 0.0 if i == 0 else t
-            end = self.frames[i + 1][1] if i + 1 < n else max(total, t)
-            duration = max(end - start, 1.0 / self.fps / 2)
+            if i + 1 < n:
+                duration = kept[i + 1][1] - start
+            else:
+                duration = max(total - start, 1.0 / self.fps)   # hold the last picture to t_stop
             lines.append(f"file 'frames/{name}'")
             lines.append(f"duration {duration:.6f}")
         # ffmpeg only honours the duration of the last entry when it is followed by another entry.
-        last_name = self.frames[-1][0]
+        last_name = kept[-1][0]
         lines.append(f"file 'frames/{last_name}'")
         return "\n".join(lines) + "\n"
 
@@ -391,6 +419,7 @@ class ScreenCapture:
         self.screen_index = int(os.environ.get("DEMO_SMOKE_SCREEN_INDEX", "0") or 0)
         self.note = ""
         self.t0: float | None = None
+        self.t_stop: float | None = None
         self.capture_start_epoch: float | None = None
         self._proc: subprocess.Popen | None = None
         self._log = None
@@ -405,6 +434,11 @@ class ScreenCapture:
             return self.t0
         if getattr(self.session, "headless", False):
             raise CaptureError("screen capture needs a visible window: use --capture screencast with --headless")
+        if platform.system() == "Linux" and os.environ.get("WAYLAND_DISPLAY"):
+            # x11grab only sees X11 (XWayland) surfaces; a native Wayland Chrome window records black.
+            self.note = ("Wayland session detected: x11grab cannot see native Wayland windows; "
+                         "use --capture screencast or run Chrome under XWayland")
+            log.warning(self.note)
         argv = self.args()
         self._log = open(self.log_path, "wb")  # noqa: SIM115 - handed to Popen, closed in stop()
         try:
@@ -430,6 +464,8 @@ class ScreenCapture:
         if self._stopped:
             return self.path
         self._stopped = True
+        if self.t0 is not None:
+            self.t_stop = time.monotonic() - self.t0
         proc = self._proc
         if proc is None:
             raise CaptureError("screen capture was never started")
@@ -460,6 +496,8 @@ class ScreenCapture:
         if self._stopped:
             return
         self._stopped = True
+        if self.t0 is not None:
+            self.t_stop = time.monotonic() - self.t0
         proc = self._proc
         if proc is not None and proc.poll() is None:
             try:

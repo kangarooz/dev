@@ -35,7 +35,11 @@ KIT_BASH_ALLOW = [
     "git status*",
     "git diff*",
 ]
-KIT_BASH_DENY = ["rm -rf *", "del *", "git push*"]
+KIT_BASH_DENY = ["rm -rf *", "del *", "git push*",
+                 # the two kit commands that reach the network are denied even under --auto
+                 "python -m demo_smoke prefetch*", "python3 -m demo_smoke prefetch*",
+                 ".venv/bin/python -m demo_smoke prefetch*", ".venv\\Scripts\\python.exe -m demo_smoke prefetch*",
+                 "* --online*"]
 KIT_EDIT_ALLOW = ["demo-output/**", "scenarios/*.json", "**/audio/narration.json"]
 
 
@@ -161,12 +165,16 @@ def test_permissions(config):
     perm = config["permission"]
     assert perm["webfetch"] == "deny"
     assert perm["websearch"] == "deny"
+    assert perm["doom_loop"] == "deny", "--auto would approve the default `ask`; a 3rd identical call must be blocked"
     bash = perm["bash"]
     assert next(iter(bash)) == "*" and bash["*"] == "ask", "catch-all must come first (last match wins)"
     for pat in KIT_BASH_ALLOW:
         assert bash.get(pat) == "allow", pat
     for pat in KIT_BASH_DENY:
         assert bash.get(pat) == "deny", pat
+    keys = list(bash)
+    assert max(keys.index(p) for p in KIT_BASH_ALLOW) < min(keys.index(p) for p in KIT_BASH_DENY), \
+        "deny rules must follow the allow rules they override (last match wins)"
     edit = perm["edit"]
     assert next(iter(edit)) == "*" and edit["*"] == "deny"
     for pat in KIT_EDIT_ALLOW:
@@ -193,12 +201,15 @@ def test_agent_frontmatter(agent):
     assert fm["description"]
     perm = fm["permission"]
     assert perm["webfetch"] == "deny" and perm["websearch"] == "deny"
+    assert perm["doom_loop"] == "deny"
     bash = perm["bash"]
     assert next(iter(bash)) == "*" and bash["*"] == "ask"
     for pat in KIT_BASH_ALLOW:
         assert bash.get(pat) == "allow", pat
     for pat in KIT_BASH_DENY:
         assert bash.get(pat) == "deny", pat
+    keys = list(bash)
+    assert max(keys.index(p) for p in KIT_BASH_ALLOW) < min(keys.index(p) for p in KIT_BASH_DENY)
     edit = perm["edit"]
     assert next(iter(edit)) == "*" and edit["*"] == "deny"
     for pat in KIT_EDIT_ALLOW:
@@ -242,15 +253,26 @@ def test_command_files(name):
 
 def test_command_templates():
     setup = (COMMANDS / "setup.md").read_text(encoding="utf-8")
-    assert "!`python -m demo_smoke doctor`" in setup
+    # the injected doctor prefers the kit's venv (bare `python` is the Store stub on Windows / absent on Debian)
+    injection = re.search(r"^!`(.*)`$", setup, re.MULTILINE)
+    assert injection, "setup.md has no !`...` injection"
+    assert ".venv/bin/python -m demo_smoke doctor" in injection.group(1)
+    assert "python3 -m demo_smoke doctor" in injection.group(1) and "python -m demo_smoke doctor" in injection.group(1)
+    assert "exit code 3 from doctor" in setup and "chrome=MISSING" in setup
     assert "scripts/setup.sh" in setup and "setup.ps1" in setup
+    for flag in ("--python PATH", "--base-url URL", "--no-doctor", "--torch-index URL",
+                 "-Python PATH", "-BaseUrl URL", "-NoDoctor", "-TorchIndex URL"):
+        assert flag in setup, flag
     smoke = (COMMANDS / "smoke.md").read_text(encoding="utf-8")
     assert "$1" in smoke and "$2" in smoke and "demo-output/<slug>" in smoke
     assert "@$1" in smoke
+    assert "$ARGUMENTS" in smoke and "`headless`" in smoke and "`.wav`" in smoke    # opencode run --command passes one message
     narrate = (COMMANDS / "narrate.md").read_text(encoding="utf-8")
     assert "@$1" in narrate and "logs/dryrun.json" in narrate and "narrate-validate" in narrate
     voice = (COMMANDS / "voice-check.md").read_text(encoding="utf-8")
     assert "voice-check --ref $1" in voice
+    assert "ask the user for the WAV path" in voice
+    assert "as `backend`" not in voice and "tts_auto" in voice     # exit-3 log has no `backend` key
 
 
 # ----------------------------------------------------------------- docs
@@ -274,8 +296,18 @@ def test_readme_mentions_key_paths():
         "Perth",
         "ARCHITECTURE.md",
         "rocm",
+        "opencode --version",                     # OpenCode is installed while online
+        "OPENCODE_DISABLE_MODELS_FETCH=1",
+        "OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS",
+        "HUGGINGFACE_HUB_CACHE",
+        "chrome-profile/",
+        "Wayland",
+        "doom_loop",
+        "export DEMO_USER=alice DEMO_PASS=secret",
     ):
         assert needle in text, needle
+    assert "DEMO_USER=alice DEMO_PASS=secret python" not in text     # no inline env prefix (unmatched by allow rules)
+    assert "about a\ndozen tool calls" not in text
 
 
 def test_ignore_file_reincludes_outputs():
@@ -288,7 +320,11 @@ def test_ignore_file_reincludes_outputs():
 def test_playbook_guards_for_small_models(agent):
     _, body = agent
     assert ".venv/bin/python" in body and "exists" in body            # venv rule keyed on existence
+    assert "`ls .venv/bin/python`" in body                            # an exact, allow-listed command for the check
     assert "tts_ready" in body and "--tts tone" in body               # no-chatterbox fallback
+    assert "--narration template`\n" in body and "--narration template --ref <ref>" not in body   # one-shot: no literal --ref
+    assert "timed out" in body                                        # bash tool timeout is a named stop condition
+    assert "Never copy `expect` values" in body                       # deterministic narration source
     assert "write tool" in body and "heredoc" in body                 # narration written whole
     assert "observed" in body and "quotes" in body                    # no selectors in narration
     assert "--headless" in body
@@ -305,6 +341,9 @@ def test_agents_md_rules():
     assert "Never" in text
     assert "narration.json" in text
     assert "demo-output" in text
+    # no second, differently numbered copy of the playbook (the agent file is the single source)
+    assert not re.search(r"^\d+\. `python -m demo_smoke (dryrun|synth|record)", text, re.MULTILINE)
+    assert ".opencode/agents/demo-smoke.md" in text
 
 
 # ----------------------------------------------------------------- setup scripts
@@ -327,6 +366,11 @@ def test_setup_scripts_exist_and_mention_requirements():
         assert "demo_smoke prefetch --tts" in text, name             # the scripts fill the HF cache
         assert "--command smoke" in text, name
         assert "/smoke scenarios" not in text, name
+        assert "OPENCODE_DISABLE_MODELS_FETCH=1" in text, name
+        assert "opencode --version" in text, name
+    assert 'cuda) [ "$OS" != Darwin ]' in sh                          # no CUDA wheels for macOS: clear message
+    req = (KIT / "requirements-tts.txt").read_text(encoding="utf-8")
+    assert "chatterbox-tts==0.1.7" in req and "gradio" in req
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not available")

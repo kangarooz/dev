@@ -82,6 +82,7 @@
   "permission": {
     "webfetch": "deny",
     "websearch": "deny",
+    "doom_loop": "deny",
     "bash": {
       "*": "ask",
       "python -m demo_smoke *": "allow",
@@ -95,6 +96,11 @@
       "type *": "allow",
       "git status*": "allow",
       "git diff*": "allow",
+      "python -m demo_smoke prefetch*": "deny",
+      "python3 -m demo_smoke prefetch*": "deny",
+      ".venv/bin/python -m demo_smoke prefetch*": "deny",
+      ".venv\\Scripts\\python.exe -m demo_smoke prefetch*": "deny",
+      "* --online*": "deny",
       "rm -rf *": "deny",
       "del *": "deny",
       "git push*": "deny"

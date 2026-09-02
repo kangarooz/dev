@@ -7,6 +7,7 @@ color: accent
 permission:
   webfetch: deny
   websearch: deny
+  doom_loop: deny
   task: deny
   bash:
     "*": ask
@@ -21,6 +22,11 @@ permission:
     "type *": allow
     "git status*": allow
     "git diff*": allow
+    "python -m demo_smoke prefetch*": deny
+    "python3 -m demo_smoke prefetch*": deny
+    ".venv/bin/python -m demo_smoke prefetch*": deny
+    '.venv\Scripts\python.exe -m demo_smoke prefetch*': deny
+    "* --online*": deny
     "rm -rf *": deny
     "del *": deny
     "git push*": deny
@@ -36,10 +42,12 @@ commands below, one tool call per step, read the result file, then decide the ne
 
 ## Ground rules
 - `<scenario>` = the scenario JSON path. `<out>` = the output directory; default `demo-output/<slug>` where slug is the `"slug"` field of the scenario. `<ref>` = the reference voice WAV, only if the user gave one.
-- Before step 1: if `.venv/bin/python` (macOS/Linux) or `.venv\Scripts\python.exe` (Windows) exists in the kit directory, use it instead of `python` in every command below. Also switch to it if any command prints `No module named ...`.
-- One command per step. Wait for it to finish. After every command, read `<out>/logs/<cmd>.json` with the read tool before you continue (on exit 3 or 4 it contains only `error` and `exit_code`). Do not search for files; read the exact path.
+- Step 0, before step 1: run exactly `ls .venv/bin/python` (Windows: `dir .venv\Scripts\python.exe`). If it prints the path, the venv exists: use that path instead of `python` in every command below. If it prints `No such file` (or `File Not Found`), use `python`. Also switch to the venv path if any command prints `No module named ...`.
+- One command per step. Wait for it to finish. After every command, read `<out>/logs/<cmd>.json` with the read tool before you continue. On exit 3, and on exit 4 from any command except `narrate-validate`, that file contains only `error` and `exit_code`; `narrate-validate`'s exit-4 log also has `errors` (a list of problems) and `budget` (the word limit). Do not search for files; read the exact path.
 - Exit codes, with the output line that goes with them: 0 = ok. 2 = the FEATURE failed (the summary line says `FAIL`): stop and write the Report. 3 = a TOOL failed (a line starting with `error:`): stop and write the Report. 4 = bad input: only `narrate-validate` may be retried (step 4, its line starts with `narrate-validate: INVALID`); from any other command stop, quote its `error:` line in the Report, and do not edit the scenario.
-- The only file you may write is `<out>/audio/narration.json`. Never edit a scenario file unless the user explicitly asked you to write or change a scenario. Never edit anything else. Never install packages. Never use the web. Never run a command that is not in this file.
+- If a command is cut off by the tool timeout (no `<cmd>:` summary line and no `error:` line came back), do not rerun it; stop and report `ERROR (stage: <cmd>, timed out)`.
+- The only file you may write is `<out>/audio/narration.json`. Never edit a scenario file unless the user explicitly asked you to write or change a scenario. Never edit anything else. Never install packages. Never use the web (`prefetch` and `--online` are denied). Never run a command that is not in this file.
+- Credentials (`DEMO_USER`, `DEMO_PASS`, ...) come from the environment the user started OpenCode in. Never put them on the command line and never ask for their values.
 - If the user says there is no display, or the run is unattended (a server, CI), add `--headless` to the dryrun and record commands.
 - Do not repeat a command that already succeeded. Do not guess results: read the files.
 
@@ -55,15 +63,16 @@ commands below, one tool call per step, read the result file, then decide the ne
 9. Write the Report.
 
 One-shot alternative when the user does not want custom narration:
-`python -m demo_smoke run <scenario> --out <out> --narration template --ref <ref>`
-then read `<out>/result.json` (keys: verdict, error, dryrun.steps, verify.checks, final_video) and write the Report.
+`python -m demo_smoke run <scenario> --out <out> --narration template`
+Add `--ref <ref>` only if the user gave a reference clip; add `--tts tone` under the same conditions as step 5 (run doctor first to know); add `--headless` under the same conditions as steps 2 and 6.
+Then read `<out>/result.json` (keys: verdict, error, dryrun.steps, verify.checks, final_video) and write the Report.
 
 ## Narration (step 3)
 File `<out>/audio/narration.json`, exactly this shape and nothing else:
 `{"intro": "...", "outro": "...", "steps": [{"id": "<step id>", "text": "..."}]}`
 - `steps` lists every scenario step id, in the same order as the scenario, no extra ids.
-- `intro`, `outro` and every `text`: at most 45 words, one or two plain sentences, first person, present tense ("I open...", "I upload..."), spoken English, no markdown, no brackets, no URLs, no code, no file names.
-- Every step text mentions the step `title`, the scenario `narration` hint if present, or the quoted words of its `expect` `text` / `contains` values (for example "Chat with Manuals"). Do not copy anything from the `observed` field of dryrun.json except words inside quotes: it contains selectors, counts and URLs that must not be spoken.
+- `intro`, `outro` and every `text`: at most 45 words (aim for 30 or fewer), one or two plain sentences, first person, present tense ("I open...", "I upload..."), spoken English, no markdown, no brackets, no URLs, no code, no file names.
+- Every step text is a rewording of the step's `narration` field, or of its `title` when `narration` is empty. Never copy `expect` values (`[1]`, `osha-1910`, file names) and never copy anything from the `observed` field of dryrun.json, not even the words in quotes: it contains selectors, counts and URLs that must not be spoken.
 - The total word count of all segments must stay below `max_length_seconds x 2.6` (the scenario field).
 - intro says what the feature is, spoken over the first screen. outro is one closing sentence.
 

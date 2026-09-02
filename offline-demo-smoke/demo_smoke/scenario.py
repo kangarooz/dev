@@ -35,6 +35,12 @@ def _is_str(v, allow_empty: bool = False) -> bool:
     return isinstance(v, str) and (allow_empty or v.strip() != "")
 
 
+def _unknown_keys(obj: dict, allowed: tuple, where: str, errors: list[str]) -> None:
+    for key in obj:
+        if key not in allowed:
+            errors.append(f"{where} has unknown key '{key}' (allowed: {', '.join(allowed)})")
+
+
 def _validate_action(a, where: str, errors: list[str]) -> None:
     if not isinstance(a, dict) or len(a) != 1:
         errors.append(f"{where} must be an object with exactly one key, one of: {', '.join(ACTIONS)}")
@@ -56,6 +62,7 @@ def _validate_action(a, where: str, errors: list[str]) -> None:
                 errors.append(f"{where}.fill.selector must be a non-empty string")
             if not isinstance(val.get("text"), str):
                 errors.append(f"{where}.fill.text must be a string")
+            _unknown_keys(val, ("selector", "text"), f"{where}.fill", errors)
     elif name == "type":
         if not isinstance(val, dict):
             errors.append(f"{where}.type must be {{selector, text, delay_ms}}")
@@ -66,6 +73,7 @@ def _validate_action(a, where: str, errors: list[str]) -> None:
                 errors.append(f"{where}.type.text must be a string")
             if "delay_ms" in val and not (_is_num(val["delay_ms"]) and val["delay_ms"] >= 0):
                 errors.append(f"{where}.type.delay_ms must be a number >= 0")
+            _unknown_keys(val, ("selector", "text", "delay_ms"), f"{where}.type", errors)
     elif name == "upload":
         if not isinstance(val, dict):
             errors.append(f"{where}.upload must be {{selector, files: [...]}}")
@@ -75,6 +83,7 @@ def _validate_action(a, where: str, errors: list[str]) -> None:
             files = val.get("files")
             if not isinstance(files, list) or not files or not all(_is_str(f) for f in files):
                 errors.append(f"{where}.upload.files must be a non-empty list of paths")
+            _unknown_keys(val, ("selector", "files"), f"{where}.upload", errors)
     elif name == "scroll":
         if not isinstance(val, dict) or not (("selector" in val) ^ ("y" in val)):
             errors.append(f"{where}.scroll must be {{selector}} or {{y}}")
@@ -85,6 +94,8 @@ def _validate_action(a, where: str, errors: list[str]) -> None:
     elif name == "wait":
         if not isinstance(val, dict) or not _is_num(val.get("ms")) or val["ms"] < 0:
             errors.append(f"{where}.wait must be {{ms: number >= 0}}")
+        else:
+            _unknown_keys(val, ("ms",), f"{where}.wait", errors)
     elif name == "wait_for":
         if not isinstance(val, dict) or not (("selector" in val) ^ ("text" in val)):
             errors.append(f"{where}.wait_for must be {{selector}} or {{text}} (+ optional timeout_s)")
@@ -137,10 +148,18 @@ def _validate_login(login, errors: list[str]) -> None:
         for key in ("url", "success_selector"):
             if key in login and not _is_str(login[key]):
                 errors.append(f"login.{key} must be a non-empty string")
+        allowed = ("type", "url", "username_selector", "password_selector", "submit_selector",
+                   "username_env", "password_env", "success_selector")
     elif t == "basic":
         for key in ("username_env", "password_env"):
             if not _is_str(login.get(key)):
                 errors.append(f"login.{key} is required for login.type 'basic'")
+        allowed = ("type", "username_env", "password_env")
+    else:
+        allowed = ("type",)
+    # Same shape as scenarios/schema.json (additionalProperties: false): a literal
+    # "password" key, for instance, must not pass validation and then be ignored.
+    _unknown_keys(login, allowed, "login", errors)
 
 
 def validate(data: dict) -> list[str]:
@@ -150,7 +169,7 @@ def validate(data: dict) -> list[str]:
         return ["scenario must be a JSON object"]
     for key in data:
         # "$schema" is the editor hint; "_dir"/"_path" are added by load() (see cli logs/scenario.json)
-        if key not in TOP_LEVEL_KEYS and key != "$schema" and not str(key).startswith("_"):
+        if key not in TOP_LEVEL_KEYS and key not in ("$schema", "_dir", "_path"):
             errors.append(f"unknown top-level key '{key}' (allowed: {', '.join(TOP_LEVEL_KEYS)})")
     if not _is_str(data.get("name")):
         errors.append("name must be a non-empty string")
@@ -167,6 +186,8 @@ def validate(data: dict) -> list[str]:
             for k in ("width", "height")
         ):
             errors.append("viewport must be {width: int > 0, height: int > 0}")
+        else:
+            _unknown_keys(vp, ("width", "height"), "viewport", errors)
     if "login" in data:
         _validate_login(data["login"], errors)
     if "max_length_seconds" in data and not (

@@ -1,6 +1,7 @@
 # Voice cloning backends (Chatterbox). Install AFTER requirements.txt, online.
 #
-# 1. Install torch for your accelerator FIRST (chatterbox-tts pins torch==2.6.0):
+# 1. Install torch for your accelerator FIRST (chatterbox-tts 0.1.7 pins torch==2.6.0 on
+#    Python <3.14; on 3.14 it wants torch>=2.9, which the kit does not support):
 #      NVIDIA CUDA 12.x : pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu126
 #      AMD ROCm (Linux) : pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/rocm6.2.4
 #      CPU only         : pip install torch==2.6.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cpu
@@ -13,6 +14,10 @@
 # it lives on the chatterbox git master. To get it, replace the chatterbox-tts line with:
 #   chatterbox-tts @ git+https://github.com/resemble-ai/chatterbox.git@5de7a54aa4e5e2baadb0182dde554908b48b85c2
 # `--tts auto` picks Nano on CPU only when the installed build has it, else Turbo.
+#
+# Size warning: chatterbox-tts 0.1.7 hard-depends on gradio 6.8 (fastapi, uvicorn, pandas,
+# pillow, ...), transformers 5.2, diffusers, librosa, spacy-pkuseg and pykakasi: expect a few GB
+# and several minutes. On Python <3.13 it also downgrades numpy to 1.x; that is expected.
 torch==2.6.0
 torchaudio==2.6.0
-chatterbox-tts>=0.1.7
+chatterbox-tts==0.1.7

@@ -140,10 +140,12 @@ if (-not $NoDoctor) {
 Write-Host @"
 == done. Next (the example scenario needs your app at http://localhost:3000 with /login and /manuals,
    and its login reads DEMO_USER / DEMO_PASS; copy your reference clip into the kit, e.g. voice\ref.wav):
-   .venv\Scripts\activate
+   .venv\Scripts\activate      (if scripts are disabled: Set-ExecutionPolicy -Scope CurrentUser RemoteSigned, or use .venv\Scripts\python.exe)
    python -m demo_smoke voice-check --ref voice\ref.wav
    `$env:DEMO_USER='...'; `$env:DEMO_PASS='...'
    python -m demo_smoke run scenarios\example-chat-with-manuals.json --out demo-output\chat-with-manuals --narration template --ref voice\ref.wav
+   The agent path needs OpenCode installed while online (https://opencode.ai; opencode --version), then, offline:
+   `$env:OPENCODE_DISABLE_MODELS_FETCH=1; `$env:OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=1200000
    opencode run --agent demo-smoke --auto --command smoke "scenarios/example-chat-with-manuals.json demo-output/chat-with-manuals"
    No app yet? Try the bundled mock app first: see README "Try it on the bundled mock app".
 "@

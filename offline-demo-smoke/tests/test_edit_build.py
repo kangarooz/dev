@@ -98,7 +98,8 @@ def test_edit_json_records_the_exact_command(built):
     assert "concat=n=3:v=1:a=0" in graph
     assert "amix=inputs=4:normalize=0" in graph
     assert "loudnorm=I=-16:TP=-1.5:LRA=11" in graph
-    assert "adelay=0:all=1" in graph                       # intro at t=0
+    assert "adelay=0|0" in graph                           # intro at t=0 (one delay per channel: ffmpeg 4.x safe)
+    assert "all=1" not in graph
     assert len([a for a in log["audio_inputs"]]) == 4
 
 

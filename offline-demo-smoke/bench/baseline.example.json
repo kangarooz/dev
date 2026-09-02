@@ -1,0 +1,22 @@
+[
+  {
+    "driver": "manual",
+    "model": "codex (cloud)",
+    "date": "2026-08-31",
+    "verdict": "PASS",
+    "total_minutes": 95,
+    "notes": "first run incl. installs; Loom link",
+    "narration_source": "cloud model",
+    "tool_calls": null
+  },
+  {
+    "driver": "manual",
+    "model": "claude (cloud)",
+    "date": "2026-08-31",
+    "verdict": "PASS",
+    "total_minutes": 40,
+    "notes": "second run, kit already installed; narration written by the model, one validation retry",
+    "narration_source": "cloud model",
+    "tool_calls": null
+  }
+]

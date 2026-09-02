@@ -1,0 +1,22 @@
+:root { color-scheme: light; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; background: #f4f6f8; color: #1d2433; }
+.topbar { display: flex; align-items: baseline; gap: 16px; padding: 16px 32px; background: #1f3a5f; color: #fff; }
+.topbar h1 { margin: 0; font-size: 22px; }
+.tag { font-size: 12px; opacity: .75; }
+main { max-width: 960px; margin: 24px auto; padding: 0 24px; display: grid; gap: 24px; }
+.panel { background: #fff; border: 1px solid #dde3ea; border-radius: 8px; padding: 20px 24px; }
+.panel h2 { margin: 0 0 12px; font-size: 16px; color: #4a5568; text-transform: uppercase; letter-spacing: .04em; }
+.upload { display: inline-block; padding: 8px 14px; border: 1px dashed #7a8ba3; border-radius: 6px; cursor: pointer; margin-right: 12px; }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; min-height: 28px; }
+.doc-chip { display: inline-block; padding: 4px 10px; background: #e8f0fb; border: 1px solid #b9cdea; border-radius: 999px; font-size: 14px; }
+textarea, input[type=text], input[type=password] { width: 100%; padding: 10px; border: 1px solid #c3ccd6; border-radius: 6px; font: inherit; }
+label { display: block; margin: 10px 0 4px; font-size: 14px; color: #4a5568; }
+.row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+button { padding: 10px 18px; background: #2b6cb0; color: #fff; border: 0; border-radius: 6px; font: inherit; cursor: pointer; }
+button:hover { background: #2c5282; }
+.status { color: #718096; font-size: 14px; }
+.answer { margin-top: 16px; padding: 14px 16px; background: #f7fafc; border-left: 4px solid #2b6cb0; border-radius: 4px; }
+.cite { display: inline-block; margin-left: 6px; padding: 2px 8px; font-size: 13px; background: #edf2f7; border-radius: 4px; color: #2d3748; }
+.error { color: #c53030; font-size: 14px; }
+.login { max-width: 420px; }

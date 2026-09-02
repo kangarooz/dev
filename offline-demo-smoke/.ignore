@@ -1,0 +1,9 @@
+# ripgrep / OpenCode honour .gitignore, which hides demo-output/. Re-include it so the
+# agent's glob/grep/read tools can see the kit's outputs (logs/*.json, report.md).
+!demo-output/
+# Outside a git checkout ripgrep ignores .gitignore, so the agent's grep/glob tools would
+# see .env: keep the credential files out here too (the read tool denies them separately).
+.env
+.env.*
+!.env.example
+.envrc

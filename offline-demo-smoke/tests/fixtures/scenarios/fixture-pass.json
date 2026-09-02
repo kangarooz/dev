@@ -1,0 +1,44 @@
+{
+  "name": "Chat with Manuals (fixture, pass)",
+  "slug": "fixture-pass",
+  "app_url": "http://127.0.0.1:8765",
+  "viewport": {"width": 1280, "height": 720},
+  "login": {"type": "none"},
+  "max_length_seconds": 60,
+  "intro": "This is the offline Chat with Manuals demo running against a local build.",
+  "outro": "That is the whole flow: upload, ask, and get a cited answer.",
+  "steps": [
+    {
+      "id": "open",
+      "title": "Open the app",
+      "narration": "First we open the app and land on the Chat with Manuals home screen.",
+      "actions": [{"goto": "/"}],
+      "expect": [{"text": "Chat with Manuals"}, {"url_contains": "127.0.0.1"}],
+      "timeout_s": 30
+    },
+    {
+      "id": "upload",
+      "title": "Upload manuals",
+      "narration": "Next we upload two equipment manuals, which show up as document chips.",
+      "actions": [
+        {"upload": {"selector": "input[type=file]", "files": ["../files/manual-a.pdf", "../files/manual-b.pdf"]}},
+        {"hover": ".doc-chip"}
+      ],
+      "expect": [{"selector": ".doc-chip", "count_min": 2}, {"selector": ".doc-chip", "contains": "manual-a.pdf"}],
+      "timeout_s": 30
+    },
+    {
+      "id": "ask",
+      "title": "Ask a question",
+      "narration": "Then we ask about the ladder inspection interval and get an answer with a citation.",
+      "actions": [
+        {"type": {"selector": "textarea", "text": "What is the ladder inspection interval?", "delay_ms": 15}},
+        {"click": "button[type=submit]"},
+        {"wait_for": {"selector": ".answer", "timeout_s": 10}},
+        {"screenshot": "after-ask"}
+      ],
+      "expect": [{"selector": ".answer", "contains": "inspect"}, {"text": "[1] manual-a.pdf p.3"}, {"not_text": "could not find"}],
+      "timeout_s": 30
+    }
+  ]
+}

@@ -1,0 +1,147 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "autoupdate": false,
+  "share": "disabled",
+  "model": "ollama/qwen3-coder:30b",
+  "small_model": "ollama/qwen3-coder:30b",
+  "default_agent": "demo-smoke",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": {
+        "baseURL": "http://localhost:11434/v1",
+        "timeout": 600000
+      },
+      "models": {
+        "qwen3-coder:30b": {
+          "name": "Qwen3 Coder 30B-A3B (local)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "qwen3:14b": {
+          "name": "Qwen3 14B (local)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "devstral:24b": {
+          "name": "Devstral Small 24B (local)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "gpt-oss:20b": {
+          "name": "gpt-oss 20B (local, tool-call loops observed)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "llama.cpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama-server (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1",
+        "timeout": 600000
+      },
+      "models": {
+        "local": {
+          "name": "whatever llama-server loaded (local)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    },
+    "lmstudio": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "LM Studio (local)",
+      "options": {
+        "baseURL": "http://127.0.0.1:1234/v1",
+        "timeout": 600000
+      },
+      "models": {
+        "local": {
+          "name": "whatever LM Studio loaded (local; needs JIT loading or one loaded model)",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        },
+        "your-model-id": {
+          "name": "PLACEHOLDER: replace the key with an id from `python -m demo_smoke check-model --base-url http://127.0.0.1:1234/v1 --list`",
+          "limit": {
+            "context": 32768,
+            "output": 8192
+          }
+        }
+      }
+    }
+  },
+  "permission": {
+    "webfetch": "deny",
+    "websearch": "deny",
+    "doom_loop": "deny",
+    "bash": {
+      "*": "ask",
+      "python -m demo_smoke *": "allow",
+      "python3 -m demo_smoke *": "allow",
+      ".venv/bin/python -m demo_smoke *": "allow",
+      ".venv\\Scripts\\python.exe -m demo_smoke *": "allow",
+      "cat *": "allow",
+      "ls": "allow",
+      "ls *": "allow",
+      "dir *": "allow",
+      "type *": "allow",
+      "git status*": "allow",
+      "git diff*": "allow",
+      "cat *.env*": "deny",
+      "type *.env*": "deny",
+      "* .env*": "deny",
+      "printenv*": "deny",
+      "env": "deny",
+      "set": "deny",
+      "export": "deny",
+      "python -m demo_smoke prefetch*": "deny",
+      "python3 -m demo_smoke prefetch*": "deny",
+      ".venv/bin/python -m demo_smoke prefetch*": "deny",
+      ".venv\\Scripts\\python.exe -m demo_smoke prefetch*": "deny",
+      "python -m demo_smoke creds set *": "deny",
+      "python3 -m demo_smoke creds set *": "deny",
+      ".venv/bin/python -m demo_smoke creds set *": "deny",
+      ".venv\\Scripts\\python.exe -m demo_smoke creds set *": "deny",
+      "* --online*": "deny",
+      "rm -rf *": "deny",
+      "del *": "deny",
+      "git push*": "deny",
+      "env *": "deny",
+      "export *": "deny",
+      "set *": "deny",
+      "declare*": "deny",
+      "*/.env*": "deny",
+      "* --env-file*": "deny",
+      "*DEMO_SMOKE_ALLOW_REMOTE_LOGIN*": "deny"
+    },
+    "read": {
+      "*": "allow",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow",
+      "*.envrc": "deny"
+    },
+    "edit": {
+      "*": "deny",
+      "demo-output/**": "allow",
+      "scenarios/*.json": "allow",
+      "**/audio/narration.json": "allow"
+    }
+  }
+}

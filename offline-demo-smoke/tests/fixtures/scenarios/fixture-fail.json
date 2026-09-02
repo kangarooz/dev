@@ -1,0 +1,39 @@
+{
+  "name": "Chat with Manuals (fixture, fail)",
+  "slug": "fixture-fail",
+  "app_url": "http://127.0.0.1:8765",
+  "viewport": {"width": 1280, "height": 720},
+  "login": {"type": "none"},
+  "max_length_seconds": 60,
+  "intro": "This run asks a question without uploading anything, so the expectation fails.",
+  "outro": "The failure report shows the console error and the failed request.",
+  "steps": [
+    {
+      "id": "open",
+      "title": "Open the app",
+      "narration": "Open the app.",
+      "actions": [{"goto": "/"}],
+      "expect": [{"text": "Chat with Manuals"}],
+      "timeout_s": 30
+    },
+    {
+      "id": "ask",
+      "title": "Ask without manuals",
+      "narration": "Ask a question before uploading any manual.",
+      "actions": [
+        {"fill": {"selector": "textarea", "text": "What is the ladder inspection interval?"}},
+        {"click": "button[type=submit]"}
+      ],
+      "expect": [{"selector": ".answer", "contains": "inspect"}],
+      "timeout_s": 4
+    },
+    {
+      "id": "never",
+      "title": "Never reached",
+      "narration": "This step is skipped after the failure.",
+      "actions": [{"wait": {"ms": 100}}],
+      "expect": [{"text": "Chat with Manuals"}],
+      "timeout_s": 5
+    }
+  ]
+}

@@ -1,0 +1,356 @@
+"""Browser tests for demo_smoke.drive against the static fixture app."""
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+from demo_smoke import chrome, dotenv, drive
+
+KIT = Path(__file__).resolve().parents[1]
+APP_DIR = KIT / "tests" / "fixtures" / "app"
+SCEN_DIR = KIT / "tests" / "fixtures" / "scenarios"
+CHROME_DEFAULT = "/opt/pw-browsers/chromium-1194/chrome-linux/chrome"
+
+
+def _env() -> None:
+    if "DEMO_SMOKE_CHROME" not in os.environ and Path(CHROME_DEFAULT).exists():
+        os.environ["DEMO_SMOKE_CHROME"] = CHROME_DEFAULT
+    if "DEMO_SMOKE_FFMPEG" not in os.environ:
+        import imageio_ffmpeg
+
+        os.environ["DEMO_SMOKE_FFMPEG"] = imageio_ffmpeg.get_ffmpeg_exe()
+
+
+def _serve_dir():
+    try:
+        from tests.fixtures.serve import serve_dir
+    except ImportError:
+        spec = importlib.util.spec_from_file_location("fixture_serve", KIT / "tests" / "fixtures" / "serve.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        serve_dir = mod.serve_dir
+    return serve_dir
+
+
+def _need_chrome() -> None:
+    _env()
+    if not chrome.find_chrome():
+        pytest.skip("no Chrome binary available (set DEMO_SMOKE_CHROME)")
+
+
+def load_scenario(name: str, base_url: str) -> dict:
+    """Load a fixture scenario without depending on demo_smoke.scenario (relative files resolve via _dir)."""
+    path = SCEN_DIR / name
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["_dir"] = path.parent
+    data["app_url"] = base_url
+    return data
+
+
+# --------------------------------------------------------------------------- pure helpers
+def test_resolve_url():
+    assert drive._resolve_url("http://h:1", "/") == "http://h:1/"
+    assert drive._resolve_url("http://h:1/", "/?auth=1") == "http://h:1/?auth=1"
+    assert drive._resolve_url("http://h:1", "login.html") == "http://h:1/login.html"
+    assert drive._resolve_url("http://h:1", "https://other/x") == "https://other/x"
+
+
+def test_expect_summary():
+    assert drive.expect_summary({"selector": ".a", "count_min": 2, "contains": "x"}) == 'selector .a count>=2 contains "x"'
+    assert drive.expect_summary({"text": "hi"}) == 'text contains "hi"'
+    assert drive.expect_summary({"not_text": "hi"}) == 'text does not contain "hi"'
+    assert drive.expect_summary({"url_contains": "auth"}) == 'url contains "auth"'
+
+
+def test_login_reports_missing_env(monkeypatch):
+    monkeypatch.delenv("DEMO_SMOKE_MISSING_USER", raising=False)
+    scenario = {"app_url": "http://localhost:3000", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER",
+                                                  "password_env": "DEMO_SMOKE_MISSING_PASS"}}
+    err = drive.login(None, scenario)
+    assert err == "login: environment variable DEMO_SMOKE_MISSING_USER is not set"
+    assert drive.login(None, {"login": {"type": "none"}}) is None
+    monkeypatch.setenv("DEMO_SMOKE_MISSING_USER", "u")
+    monkeypatch.setenv("DEMO_SMOKE_MISSING_PASS", "p")
+    assert "unsupported" in drive.login(None, {"login": {"type": "oauth", "username_env": "DEMO_SMOKE_MISSING_USER",
+                                                         "password_env": "DEMO_SMOKE_MISSING_PASS"}})
+    # literal credentials in the scenario file are refused, not silently used
+    err = drive.login(None, {"app_url": "http://localhost:3000", "login": {"type": "basic", "username": "u", "password": "p"}})
+    assert err == "login: username_env and password_env are required (credentials never come from the scenario file)"
+    err = drive.login(None, {"app_url": "http://localhost:3000", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER"}})
+    assert "username_env and password_env are required" in err
+    # an op:// reference that reached the environment unresolved is not typed into the app
+    monkeypatch.setenv("DEMO_SMOKE_MISSING_PASS", "op://Private/Legion/password")
+    err = drive.login(None, {"app_url": "http://localhost:3000", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER",
+                                                             "password_env": "DEMO_SMOKE_MISSING_PASS"}})
+    assert err == ("login: DEMO_SMOKE_MISSING_PASS is an unresolved op:// reference "
+                   "(run `python -m demo_smoke creds check DEMO_SMOKE_MISSING_PASS`)")
+
+
+def test_login_refuses_non_loopback_hosts_unless_allowed(monkeypatch):
+    """A scenario file the agent may write must not be able to post the credentials anywhere."""
+    monkeypatch.setenv("DEMO_SMOKE_USER", "u")
+    monkeypatch.setenv("DEMO_SMOKE_PASS", "p")
+    monkeypatch.delenv("DEMO_SMOKE_ALLOW_REMOTE_LOGIN", raising=False)
+    basic = {"type": "basic", "username_env": "DEMO_SMOKE_USER", "password_env": "DEMO_SMOKE_PASS"}
+    err = drive.login(None, {"app_url": "http://app.example.com", "login": basic})
+    assert err.startswith("login: http://app.example.com is not a loopback address")
+    assert "DEMO_SMOKE_ALLOW_REMOTE_LOGIN=1" in err and "\n" not in err
+    # a form whose login page lives on another host is refused as well
+    err = drive.login(None, {"app_url": "http://localhost:3000",
+                             "login": {**basic, "type": "form", "url": "https://sso.example.com/login"}})
+    assert "https://sso.example.com/login is not a loopback address" in err
+    assert "is not a loopback" in drive.login(None, {"app_url": "http://10.0.0.5:3000", "login": basic})
+
+    class FakePage:
+        def __init__(self):
+            self.routes = []
+
+        def route(self, pattern, handler):
+            self.routes.append(pattern)
+
+    for url in ("http://localhost:3000", "http://127.0.0.1:8765", "http://127.1.2.3", "http://[::1]:3000",
+                "http://app.localhost", "http://LOCALHOST"):
+        page = FakePage()
+        assert drive.login(page, {"app_url": url, "login": basic}) is None, url
+        assert page.routes == ["**/*"]
+    monkeypatch.setenv("DEMO_SMOKE_ALLOW_REMOTE_LOGIN", "1")
+    page = FakePage()
+    assert drive.login(page, {"app_url": "http://app.example.com", "login": basic}) is None
+    assert drive.credential_names({"login": basic}) == ("DEMO_SMOKE_USER", "DEMO_SMOKE_PASS")
+    assert drive.credential_names({"login": {"type": "none"}}) == ()
+
+
+def test_login_resolves_a_deferred_op_reference_without_exporting_it(monkeypatch):
+    monkeypatch.setenv("DEMO_SMOKE_USER", "u")
+    monkeypatch.delenv("DEMO_SMOKE_DEF_PASS", raising=False)
+    monkeypatch.setattr(dotenv, "resolve_op", lambda ref: "pw-for-" + ref)
+    dotenv.forget_deferred()
+    dotenv.load_env.deferred["DEMO_SMOKE_DEF_PASS"] = "op://v/i/p"
+    seen = {}
+    monkeypatch.setattr(drive, "install_basic_auth", lambda page, url, user, pw: seen.update(user=user, pw=pw))
+    scenario = {"app_url": "http://localhost:3000",
+                "login": {"type": "basic", "username_env": "DEMO_SMOKE_USER", "password_env": "DEMO_SMOKE_DEF_PASS"}}
+    assert drive.login(None, scenario) is None
+    assert seen == {"user": "u", "pw": "pw-for-op://v/i/p"}
+    assert "DEMO_SMOKE_DEF_PASS" not in os.environ
+    dotenv.forget_deferred()
+    err = drive.login(None, scenario)
+    assert err == "login: environment variable DEMO_SMOKE_DEF_PASS is not set"
+
+
+def test_scrub_passwords_drops_only_password_values():
+    html = ('<input type="text" value="alice"><INPUT id=p type=password value="s3cret-9x">'
+            "<input value='s3cret-9x' type='password'><input type=\"password\" value=s3cret-9x>")
+    out = drive._scrub_passwords(html)
+    assert "s3cret-9x" not in out and 'value="alice"' in out and "id=p" in out
+
+
+def test_origin_comparison_fills_default_ports():
+    assert drive._origin("http://Host") == drive._origin("http://host:80/x?y")
+    assert drive._origin("https://host") == ("https", "host", 443)
+    assert drive._origin("http://host:8000") != drive._origin("http://host:8001")
+    assert drive._origin("http://host") != drive._origin("https://host")
+
+
+# --------------------------------------------------------------------------- browser
+def test_dryrun_pass(tmp_path):
+    _need_chrome()
+    with _serve_dir()(APP_DIR) as base:
+        scenario = load_scenario("fixture-pass.json", base)
+        result = drive.dryrun(scenario, tmp_path, headless=True)
+
+    assert result["verdict"] == "PASS"
+    assert result["exit_code"] == 0
+    assert result["attempts"] == 1
+    assert [s["id"] for s in result["steps"]] == ["open", "upload", "ask"]
+    assert all(s["status"] == "PASS" for s in result["steps"])
+    for key in ("id", "title", "status", "expected", "observed", "screenshot", "seconds", "error"):
+        assert key in result["steps"][0]
+    assert result["console_errors"] == []
+    assert result["failed_requests"] == []
+
+    logs = tmp_path / "logs"
+    for name in ("step-01-open.png", "step-02-upload.png", "step-03-ask.png", "after-ask.png", "dryrun.json"):
+        assert (logs / name).exists(), name
+    assert not list(logs.glob("failure-*.html"))
+    # the Chrome profile (cookies, localStorage of the app session) does not outlive the run
+    assert not list(tmp_path.glob("chrome-profile*")) and (logs / "chrome.log").exists()
+    md = (logs / "smoke-results.md").read_text(encoding="utf-8")
+    assert "**PASS**" in md
+    assert "| ask |" in md
+    saved = json.loads((logs / "dryrun.json").read_text(encoding="utf-8"))
+    assert saved["verdict"] == "PASS"
+    # the answer step waits ~1.2 s for the delayed answer, which is below the wait-window threshold
+    ask = result["steps"][2]
+    assert "inspect" in ask["observed"]
+    assert ask["wait_windows"] == []
+
+
+def test_dryrun_fail_captures_failure_context(tmp_path):
+    _need_chrome()
+    with _serve_dir()(APP_DIR) as base:
+        scenario = load_scenario("fixture-fail.json", base)
+        result = drive.dryrun(scenario, tmp_path, headless=True)
+
+    assert result["verdict"] == "FAIL"
+    assert result["exit_code"] == 2
+    assert result["attempts"] == 2, "a FAIL must be retried once"
+    statuses = {s["id"]: s["status"] for s in result["steps"]}
+    assert statuses == {"open": "PASS", "ask": "FAIL", "never": "SKIPPED"}
+    ask = next(s for s in result["steps"] if s["id"] == "ask")
+    assert ask["error"] and "\n" not in ask["error"]
+    assert "not found" in ask["error"]
+    assert ask["wait_windows"] and ask["wait_windows"][0][1] - ask["wait_windows"][0][0] >= 1.5
+    assert any("No manuals uploaded" in e for e in result["console_errors"])
+    assert any(r["status"] == 404 and "/api/answer" in r["url"] for r in result["failed_requests"])
+    never = next(s for s in result["steps"] if s["id"] == "never")
+    assert never["screenshot"] is None and "skipped" in never["error"]
+
+    logs = tmp_path / "logs"
+    html = (logs / "failure-ask.html").read_text(encoding="utf-8")
+    assert "Chat with Manuals" in html
+    md = (logs / "smoke-results.md").read_text(encoding="utf-8")
+    assert "**FAIL**" in md and "No manuals uploaded" in md and "/api/answer" in md
+    assert "attempt 1 failed" in md and "attempt 2 failed" in md
+
+
+def test_failure_html_never_holds_a_typed_password(tmp_path):
+    """Frameworks with controlled inputs mirror the typed value into the attribute; the DOM dump
+    written for a failing step must not carry it (the agent may read failure-*.html)."""
+    _need_chrome()
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text(
+        "<!doctype html><title>Mirror</title><h1>Sign in</h1>"
+        '<input id="u" type="text"><input id="p" type="password">'
+        '<script>document.getElementById("p").addEventListener("input", function (e) {'
+        ' e.target.setAttribute("value", e.target.value); });</script>', encoding="utf-8")
+    scenario = {"steps": [{"id": "typing", "title": "type", "timeout_s": 2,
+                           "actions": [{"goto": "/index.html"}, {"fill": {"selector": "#p", "text": "hunter2-Xq9"}}],
+                           "expect": [{"text": "never on this page"}]}]}
+    with _serve_dir()(site) as base:
+        scenario["app_url"] = base
+        result = drive.dryrun(scenario, tmp_path / "out", headless=True)
+    assert result["verdict"] == "FAIL"
+    html = (tmp_path / "out" / "logs" / "failure-typing.html").read_text(encoding="utf-8")
+    assert "hunter2-Xq9" not in html and 'id="p"' in html and "Sign in" in html
+
+
+def test_launch_keeps_credential_names_out_of_chrome_env(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_popen(args, **kw):
+        seen["env"] = kw["env"]
+        raise OSError("not today")
+
+    monkeypatch.setattr(chrome.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(chrome, "find_chrome", lambda: sys.executable)
+    monkeypatch.setenv("DEMO_SMOKE_SECRET_X", "s3cret")
+    monkeypatch.setenv("DEMO_SMOKE_PLAIN_Y", "keep")
+    with pytest.raises(chrome.ChromeError, match="could not start Chrome"):
+        chrome.launch(tmp_path, {}, headless=True, env_omit=("DEMO_SMOKE_SECRET_X",))
+    assert "DEMO_SMOKE_SECRET_X" not in seen["env"] and seen["env"]["DEMO_SMOKE_PLAIN_Y"] == "keep"
+    assert not list(tmp_path.glob("chrome-profile*"))       # a failed launch leaves no profile behind
+
+
+def test_dryrun_login_form(tmp_path, monkeypatch):
+    _need_chrome()
+    monkeypatch.setenv("DEMO_SMOKE_USER", "demo")
+    monkeypatch.setenv("DEMO_SMOKE_PASS", "secret")
+    with _serve_dir()(APP_DIR) as base:
+        scenario = load_scenario("fixture-login.json", base)
+        result = drive.dryrun(scenario, tmp_path, headless=True)
+    assert result["verdict"] == "PASS", [s["error"] for s in result["steps"]]
+    assert result["attempts"] == 1
+    open_step = result["steps"][0]
+    assert "auth=1" in open_step["observed"]
+
+
+def test_dryrun_basic_auth(tmp_path, monkeypatch):
+    _need_chrome()
+    monkeypatch.setenv("DEMO_SMOKE_USER", "demo")
+    monkeypatch.setenv("DEMO_SMOKE_PASS", "secret")
+    with _serve_dir()(APP_DIR, basic_auth=("demo", "secret")) as base:
+        scenario = load_scenario("fixture-pass.json", base)
+        scenario["login"] = {"type": "basic", "username_env": "DEMO_SMOKE_USER", "password_env": "DEMO_SMOKE_PASS"}
+        result = drive.dryrun(scenario, tmp_path, headless=True)
+    assert result["verdict"] == "PASS", [s["error"] for s in result["steps"]]
+
+
+def test_basic_auth_header_stays_on_the_app_origin(tmp_path, monkeypatch):
+    """The Basic token goes to app_url's origin only: a second server (a CDN, analytics, any third
+    party the app loads) must never see it."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    _need_chrome()
+    seen: list[dict] = []
+
+    class Other(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            seen.append({"path": self.path, "authorization": self.headers.get("Authorization")})
+            body = b"<p id='other'>other origin</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    other_srv = ThreadingHTTPServer(("127.0.0.1", 0), Other)
+    Thread(target=other_srv.serve_forever, daemon=True).start()
+    other = f"http://127.0.0.1:{other_srv.server_address[1]}"
+    monkeypatch.setenv("DEMO_SMOKE_USER", "demo")
+    monkeypatch.setenv("DEMO_SMOKE_PASS", "secret")
+    try:
+        with _serve_dir()(APP_DIR, basic_auth=("demo", "secret")) as base, \
+                chrome.launch(tmp_path, {"width": 640, "height": 480}, headless=True) as session:
+            page = session.page
+            scenario = {"app_url": base, "login": {"type": "basic", "username_env": "DEMO_SMOKE_USER",
+                                                   "password_env": "DEMO_SMOKE_PASS"}}
+            assert drive.login(page, scenario) is None
+            page.goto(base + "/", wait_until="load")
+            assert "Sign in required" not in page.content()          # the app itself got the token
+            page.evaluate("u => fetch(u).then(r => r.text())", other + "/asset.js")   # a cross-origin sub-resource
+            page.goto(other + "/page", wait_until="load")                              # and a cross-origin navigation
+            assert "other origin" in page.content()
+    finally:
+        other_srv.shutdown()
+        other_srv.server_close()
+    assert {s["path"] for s in seen} == {"/asset.js", "/page"}
+    assert all(s["authorization"] is None for s in seen), seen
+
+
+def test_selector_expectation_counts_visible_elements_only(tmp_path):
+    """schema.json: 'At least one visible element matches' - a hidden placeholder must not pass."""
+    _need_chrome()
+    with chrome.launch(tmp_path, {"width": 640, "height": 480}, headless=True) as session:
+        page = session.page
+        page.set_content('<div class="answer" style="display:none">inspect hidden</div>'
+                         '<div class="chip">one</div><div class="chip" hidden>two</div>')
+        ok, obs = drive.check_expectation(page, {"selector": ".answer"})
+        assert ok is False and "0 visible" in obs
+        ok, _ = drive.check_expectation(page, {"selector": ".answer", "contains": "inspect"})
+        assert ok is False
+        ok, obs = drive.check_expectation(page, {"selector": ".chip", "count_min": 1})
+        assert ok is True and "1 visible" in obs
+        ok, _ = drive.check_expectation(page, {"selector": ".chip", "count_min": 2})
+        assert ok is False
+        page.set_content('<div class="answer">Ladders must be inspected</div>')
+        ok, _ = drive.check_expectation(page, {"selector": ".answer", "contains": "inspect"})
+        assert ok is True
+
+
+def test_dryrun_launch_failure_is_drive_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("DEMO_SMOKE_CHROME", str(tmp_path / "no-such-chrome"))
+    with pytest.raises(drive.DriveError) as excinfo:
+        drive.dryrun({"app_url": "http://127.0.0.1:1", "steps": []}, tmp_path, headless=True)
+    assert "\n" not in str(excinfo.value)

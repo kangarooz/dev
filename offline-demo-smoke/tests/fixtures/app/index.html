@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat with Manuals</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+<script>
+  // Auth gate for the login fixture: only when the URL carries ?auth=1 do we
+  // require the localStorage flag that login.html sets.
+  (function () {
+    var params = new URLSearchParams(window.location.search);
+    var flag = null;
+    try { flag = window.localStorage.getItem("cwm_auth"); } catch (e) { flag = null; }
+    if (params.get("auth") === "1" && !flag) {
+      var next = window.location.pathname + window.location.search;
+      window.location.replace("login.html?next=" + encodeURIComponent(next));
+    }
+  })();
+</script>
+</head>
+<body>
+<header class="topbar">
+  <h1>Chat with Manuals</h1>
+  <span class="tag">offline demo fixture</span>
+</header>
+<main>
+  <section class="panel">
+    <h2>Manuals</h2>
+    <label class="upload" for="file-input">Upload manuals</label>
+    <input id="file-input" type="file" multiple accept="application/pdf">
+    <div id="docs" class="chips" aria-live="polite"></div>
+  </section>
+  <section class="panel">
+    <h2>Ask</h2>
+    <form id="ask-form">
+      <textarea id="question" name="question" rows="3" placeholder="Ask a question about the uploaded manuals"></textarea>
+      <div class="row">
+        <button type="submit" id="ask-btn">Ask</button>
+        <span id="status" class="status" aria-live="polite"></span>
+      </div>
+    </form>
+    <div id="answers"></div>
+  </section>
+</main>
+<script src="app.js"></script>
+</body>
+</html>

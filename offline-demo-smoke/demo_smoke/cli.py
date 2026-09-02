@@ -160,6 +160,7 @@ def cmd_doctor(args) -> int:
     endpoints = rep.get("local_endpoints") or []
     up = [e["name"] for e in endpoints if e.get("reachable")]
     bits.append("local_llm=" + (",".join(up) if up else "none"))
+    bits.append(f"disk_free={rep.get('disk_free_gb')}G")
     problems = [k for k in ("ffmpeg", "chrome") if not rep.get(k)]
     if args.base_url and not llm.get("reachable"):
         problems.append("llm unreachable")

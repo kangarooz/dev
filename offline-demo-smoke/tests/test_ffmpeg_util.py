@@ -178,3 +178,20 @@ def test_run_never_uses_a_shell():
     cp = ff.run(["-i", weird], check=False)
     assert weird in cp.stderr or "No such file" in cp.stderr
     assert os.environ.get("DEMO_SMOKE_FFMPEG") is None or Path(os.environ["DEMO_SMOKE_FFMPEG"]).is_file()
+
+
+@pytest.mark.parametrize("ver,flag", [((9, 0), "-/filter_complex"), ((7, 0), "-/filter_complex"),
+                                      ((6, 1), "-filter_complex_script"), ((4, 4), "-filter_complex_script"),
+                                      (None, "-/filter_complex")])
+def test_filter_script_args_by_version(monkeypatch, ver, flag):
+    """ffmpeg 9 removed -filter_complex_script (seen on the tablet); 7+ has -/filter_complex."""
+    monkeypatch.setattr(ff, "version_tuple", lambda ffmpeg=None: ver)
+    assert ff.filter_script_args("g.txt") == [flag, "g.txt"]
+
+
+def test_version_tuple_of_the_real_binary():
+    ver = ff.version_tuple()
+    assert ver is None or (isinstance(ver, tuple) and ver[0] >= 4)
+    # the bundled/system binary must accept whatever spelling we choose for it
+    flag, _ = ff.filter_script_args("x")
+    assert flag in ("-/filter_complex", "-filter_complex_script")

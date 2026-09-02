@@ -355,3 +355,36 @@ def test_detect_reports_smart_app_control_only_on_windows(monkeypatch, tmp_path)
     rep = env.detect()
     assert rep["smart_app_control"] == "off"
     assert not any("Smart App Control" in h for h in rep["hints"])
+
+
+def _snapshot(cache, repo, files, commit="abc123"):
+    d = cache / ("models--" + repo.replace("/", "--"))
+    (d / "refs").mkdir(parents=True, exist_ok=True)
+    (d / "refs" / "main").write_text(commit, encoding="utf-8")
+    snap = d / "snapshots" / commit
+    snap.mkdir(parents=True, exist_ok=True)
+    (d / "blobs").mkdir(exist_ok=True)
+    for f in files:
+        (snap / f).write_bytes(b"x")
+    return d
+
+
+def test_turbo_snapshot_with_transformers_tokenizer_files_is_ready(tmp_path):
+    """The real Turbo snapshot ships tokenizer_config.json + vocab.json + merges.txt, not
+    tokenizer.json (tts_ready was a false negative on the tablet)."""
+    cache = tmp_path / "hub"
+    _snapshot(cache, env.HF_REPOS["turbo"],
+              ["ve.safetensors", "t3_turbo_v1.safetensors", "s3gen_meanflow.safetensors",
+               "tokenizer_config.json", "vocab.json", "merges.txt"])
+    assert env.hf_weights_present(str(cache))["turbo"] is True
+    _snapshot(cache, env.HF_REPOS["nano"],
+              ["ve.safetensors", "t3_nano_v1.safetensors", "s3gen_meanflow.safetensors", "tokenizer.json"])
+    assert env.hf_weights_present(str(cache))["nano"] is True
+    _snapshot(cache, env.HF_REPOS["classic"],
+              ["ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer_config.json", "conds.pt"])
+    assert env.hf_weights_present(str(cache))["classic"] is False   # classic really needs tokenizer.json
+
+
+def test_disk_free_gb(tmp_path):
+    assert env.disk_free_gb(tmp_path) > 0
+    assert env.disk_free_gb(tmp_path / "does" / "not" / "exist") > 0

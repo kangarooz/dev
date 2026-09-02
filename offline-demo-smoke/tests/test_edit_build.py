@@ -88,9 +88,10 @@ def test_edit_json_records_the_exact_command(built):
     log = json.loads((out / "logs" / "edit.json").read_text(encoding="utf-8"))
     argv = log["argv"]
     assert argv[0] == ff.find_ffmpeg()
-    assert "-filter_complex_script" in argv and "libx264" in argv and "aac" in argv
+    flag = "-/filter_complex" if "-/filter_complex" in argv else "-filter_complex_script"
+    assert flag in argv and "libx264" in argv and "aac" in argv
     assert argv[argv.index("-crf") + 1] == "20" and argv[argv.index("-b:a") + 1] == "160k"
-    script = Path(argv[argv.index("-filter_complex_script") + 1])
+    script = Path(argv[argv.index(flag) + 1])
     assert script.is_file()
     graph = script.read_text(encoding="utf-8")
     assert graph == log["filter_complex"] + "\n"

@@ -221,6 +221,18 @@ def chatterbox_nano_supported() -> bool | None:
     return False
 
 
+def disk_free_gb(path: str | Path) -> float | None:
+    """Free space (GB, one decimal) on the drive holding ``path`` or its nearest
+    existing parent; None when it cannot be measured."""
+    p = Path(path)
+    while not p.exists() and p.parent != p:
+        p = p.parent
+    try:
+        return round(shutil.disk_usage(p).free / 1e9, 1)
+    except OSError:
+        return None
+
+
 def hf_cache_dir() -> str:
     """The Hugging Face hub cache, resolved like huggingface_hub does:
     ``HF_HUB_CACHE`` -> ``HUGGINGFACE_HUB_CACHE`` -> ``$HF_HOME/hub`` ->
@@ -256,9 +268,18 @@ HF_WEIGHT_FILES = {
     "nano": ("ve.safetensors", "t3_nano_v1.safetensors", "s3gen_meanflow.safetensors", "tokenizer.json"),
     "classic": ("ve.safetensors", "t3_cfg.safetensors", "s3gen.safetensors", "tokenizer.json", "conds.pt"),
 }
+# Turbo/Nano load their tokenizer with transformers' AutoTokenizer, whose snapshot ships
+# tokenizer_config.json + vocab.json + merges.txt rather than a single tokenizer.json
+# (a false "tts_ready=NO" otherwise).  Classic uses EnTokenizer on tokenizer.json itself.
+HF_FILE_ALTERNATIVES = {
+    "turbo": {"tokenizer.json": ("tokenizer_config.json",)},
+    "nano": {"tokenizer.json": ("tokenizer_config.json",)},
+    "classic": {},
+}
 
 
-def hf_snapshot_ready(repo_dir: Path, files: tuple[str, ...]) -> bool:
+def hf_snapshot_ready(repo_dir: Path, files: tuple[str, ...],
+                      alternatives: dict[str, tuple[str, ...]] | None = None) -> bool:
     """Is the ``refs/main`` snapshot of ``repo_dir`` complete?
 
     huggingface_hub writes ``refs/main`` and creates ``snapshots/<commit>/``
@@ -279,7 +300,11 @@ def hf_snapshot_ready(repo_dir: Path, files: tuple[str, ...]) -> bool:
         return False
     if any((repo_dir / "blobs").glob("*.incomplete")):
         return False
-    return all((snap / f).is_file() for f in files)
+    for f in files:
+        names = (f, *(alternatives or {}).get(f, ()))
+        if not any((snap / n).is_file() for n in names):
+            return False
+    return True
 
 
 def hf_weights_present(cache: str | None = None) -> dict:
@@ -288,7 +313,8 @@ def hf_weights_present(cache: str | None = None) -> dict:
     found = {}
     for backend, repo in HF_REPOS.items():
         d = root / ("models--" + repo.replace("/", "--"))
-        found[backend] = hf_snapshot_ready(d, HF_WEIGHT_FILES[backend]) if d.is_dir() else False
+        found[backend] = (hf_snapshot_ready(d, HF_WEIGHT_FILES[backend], HF_FILE_ALTERNATIVES.get(backend))
+                          if d.is_dir() else False)
     return found
 
 
@@ -385,8 +411,16 @@ def detect(base_url: str | None = None, model: str | None = None,
     try:
         rep["ffmpeg"] = find_ffmpeg()
         rep["ffmpeg_version"] = ffmpeg_version(rep["ffmpeg"])
+        m = re.match(r"n?(\d+)\.(\d+)", rep["ffmpeg_version"] or "")
+        if m and (int(m.group(1)), int(m.group(2))) < (4, 3):
+            hints.append(f"ffmpeg {rep['ffmpeg_version']} is too old (4.3+ needed for adelay=all=1): "
+                         "upgrade, or set DEMO_SMOKE_FFMPEG to the imageio-ffmpeg binary in the venv")
     except (RuntimeError, OSError) as e:
         hints.append(str(e))
+    rep["disk_free_gb"] = disk_free_gb(rep["hf_cache"])
+    if rep["disk_free_gb"] is not None and rep["disk_free_gb"] < 10:
+        hints.append(f"only {rep['disk_free_gb']} GB free on the drive holding the HF cache ({rep['hf_cache']}): "
+                     "Chatterbox weights need ~2-5 GB and each demo run a few hundred MB")
     try:
         rep["ffprobe"] = find_ffprobe()
     except (RuntimeError, OSError):

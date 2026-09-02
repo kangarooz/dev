@@ -74,6 +74,8 @@ All commands are PowerShell, run from this directory (`offline-demo-smoke`).
    free space on C:.
 
 8. Send ONE consolidated report to `dev-0a [835fa6]` with SendMessage. First line:
-   `Tablet setup report: <PASS/FAIL summary>`. Send an interim message only if the
-   setup fails and cannot be recovered. Also summarize what you did for the user in
-   your own session.
+   `Tablet setup report: <PASS/FAIL summary>`. If that session is not reachable
+   (cloud sessions are often not addressable from a laptop), do not retry: print the
+   full report in your own session so the user can paste it into the cloud session.
+   Send an interim message only if the setup fails and cannot be recovered. Also
+   summarize what you did for the user in your own session.

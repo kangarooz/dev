@@ -533,7 +533,9 @@ def launch(out: Path, viewport: dict, headless: bool = False, env_omit=()) -> Ch
     Raises ``ChromeError`` with a one-line message when Chrome is missing or
     does not come up.
     """
-    out = Path(out)
+    # Absolute: Chrome 152 on Windows exits 0 at once (no log, no DevTools) when
+    # --user-data-dir is a relative path, e.g. from a relative --out.
+    out = Path(out).resolve()
     viewport = {"width": int((viewport or {}).get("width", DEFAULT_VIEWPORT["width"])),
                 "height": int((viewport or {}).get("height", DEFAULT_VIEWPORT["height"]))}
     chrome = find_chrome()

@@ -327,7 +327,7 @@ def build(out: Path, scenario: dict) -> Path:
     args: list[str] = ["-y"]
     for p in inputs:
         args += ["-i", str(p)]
-    args += ["-filter_complex_script", str(script), "-map", "[vout]", "-map", "[aout]",
+    args += [*ff.filter_script_args(script), "-map", "[vout]", "-map", "[aout]",
              "-c:v", "libx264", "-crf", "20", "-preset", "medium", "-pix_fmt", "yuv420p",
              "-movflags", "+faststart", "-c:a", "aac", "-b:a", "160k", "-ar", str(SAMPLE_RATE),
              str(final)]

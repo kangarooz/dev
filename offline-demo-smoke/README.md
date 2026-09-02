@@ -638,6 +638,24 @@ company's video host; the file needs no re-encoding.
   tracebacks. For OpenCode itself: `OPENCODE_DISABLE_MODELS_FETCH=1` and
   `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` (see "The OpenCode path").
 
+### Seen on real Windows machines
+
+- **Chrome exits immediately, empty `logs/chrome.log`, DevTools never answers.** Chrome 152
+  on Windows exits 0 when `--user-data-dir` is a relative path. The kit now resolves the
+  output directory to an absolute path before launching, so a relative `--out` is fine.
+- **`Unrecognized option 'filter_complex_script'` during `edit`.** ffmpeg 9 removed that
+  flag. The kit picks the spelling by ffmpeg version (`-/filter_complex FILE` on 7+,
+  `-filter_complex_script` before). `doctor` prints the ffmpeg version it will use; a
+  system ffmpeg on PATH wins over the bundled imageio-ffmpeg one, set `DEMO_SMOKE_FFMPEG`
+  to choose explicitly.
+- **`tts_ready=NO` although `prefetch` finished.** Turbo/Nano snapshots ship
+  `tokenizer_config.json` + `vocab.json` + `merges.txt` instead of `tokenizer.json`; the
+  readiness check accepts either now.
+- **Low disk.** `doctor` prints `disk_free=<GB>G` for the drive holding the HF cache and
+  warns under 10 GB. Weights are 2-5 GB per backend; each run's `demo-output/<slug>` is a few
+  hundred MB (screencast frames are deleted after assembly, the Chrome profile after close).
+- **Smart App Control.** See the warning `doctor` prints; it is a one-way switch.
+
 ## Privacy and consent
 
 - Voice cloning: only clone a voice whose owner has agreed to it, and say in the

@@ -111,3 +111,21 @@ def test_close_ends_the_real_browser_process(tmp_path):
         time.sleep(0.1)
     assert not chrome._pid_alive(pid)
     assert not (tmp_path / "chrome-profile").exists()
+
+
+def test_launch_passes_an_absolute_profile_dir_for_a_relative_out(tmp_path, monkeypatch):
+    """Chrome 152 on Windows exits 0 when --user-data-dir is relative (seen on the tablet)."""
+    seen = {}
+
+    def fake_popen(args, **kw):
+        seen["args"] = args
+        raise OSError("stop here")
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(chrome.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(chrome, "find_chrome", lambda: sys.executable)
+    with pytest.raises(chrome.ChromeError, match="could not start Chrome"):
+        chrome.launch(Path("demo-output") / "fixture", {}, headless=True)
+    udd = next(a for a in seen["args"] if a.startswith("--user-data-dir=")).split("=", 1)[1]
+    assert Path(udd).is_absolute()
+    assert Path(udd).parent == (tmp_path / "demo-output" / "fixture").resolve()

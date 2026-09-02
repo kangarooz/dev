@@ -47,6 +47,40 @@ def find_ffmpeg() -> str:
     )
 
 
+def version_tuple(ffmpeg: str | None = None) -> tuple[int, int] | None:
+    """``(major, minor)`` of the ffmpeg binary, or None when it cannot be parsed
+    (git builds without a numeric version).  One subprocess per binary, cached."""
+    exe = ffmpeg or find_ffmpeg()
+    if exe in _VERSION_CACHE:
+        return _VERSION_CACHE[exe]
+    result = None
+    try:
+        cp = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=20, check=False)
+        first = (cp.stdout or cp.stderr or "").splitlines()[0] if (cp.stdout or cp.stderr) else ""
+        m = re.search(r"ffmpeg version (?:n)?(\d+)\.(\d+)", first)
+        if m:
+            result = (int(m.group(1)), int(m.group(2)))
+    except (OSError, subprocess.SubprocessError):
+        result = None
+    _VERSION_CACHE[exe] = result
+    return result
+
+
+_VERSION_CACHE: dict[str, tuple[int, int] | None] = {}
+
+
+def filter_script_args(script: str | Path, ffmpeg: str | None = None) -> list[str]:
+    """The argv pair that loads a filter graph from a file.
+
+    ffmpeg 9 removed ``-filter_complex_script``; the replacement ``-/filter_complex
+    FILE`` (read the option's value from a file) exists since 7.0.  Older builds
+    only know the old spelling.  Unknown version: assume a current build."""
+    ver = version_tuple(ffmpeg)
+    if ver is not None and ver[0] < 7:
+        return ["-filter_complex_script", str(script)]
+    return ["-/filter_complex", str(script)]
+
+
 # --------------------------------------------------------------------------- running
 
 

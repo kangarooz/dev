@@ -868,7 +868,7 @@ def build_meta_video(clips: list[Path], narration: dict, out: Path, tts: str = "
     for p in inputs:
         args += ["-i", str(p)]
     # veryfast: the source is already crf-23 ultrafast screen footage, a slower preset buys nothing
-    args += ["-filter_complex_script", str(script), "-map", "[vout]", "-map", "[aout]",
+    args += [*ff.filter_script_args(script), "-map", "[vout]", "-map", "[aout]",
              "-c:v", "libx264", "-crf", "20", "-preset", "veryfast", "-pix_fmt", "yuv420p",
              "-movflags", "+faststart", "-c:a", "aac", "-b:a", "160k", "-ar", str(SAMPLE_RATE),
              str(out)]

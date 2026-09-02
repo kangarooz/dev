@@ -13,6 +13,7 @@ import logging
 import os
 import platform
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -147,16 +148,51 @@ def _wait_for_devtools(port: int, proc: subprocess.Popen, log_path: Path, timeou
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.monotonic() + timeout
     last_err = ""
+    detached = False
     while time.monotonic() < deadline:
-        if proc.poll() is not None:
-            raise ChromeError(f"Chrome exited with code {proc.returncode} during startup ({_log_tail(log_path)})")
+        rc = proc.poll()
+        if rc is not None and rc != 0:
+            raise ChromeError(f"Chrome exited with code {rc} during startup ({_log_tail(log_path)})")
+        if rc == 0 and not detached:
+            # Chrome 15x and Edge on Windows hand the launch to a separate browser
+            # process and exit 0 immediately; DevTools still comes up on the port.
+            detached = True
+            log.debug("Chrome launcher exited 0 before DevTools answered; waiting for a detached browser process")
         try:
             with opener.open(url, timeout=1.0) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             last_err = str(exc).splitlines()[0] if str(exc) else exc.__class__.__name__
             time.sleep(0.1)
-    raise ChromeError(f"Chrome DevTools endpoint on port {port} did not answer within {timeout:.0f} s ({last_err})")
+    hint = ""
+    if detached:
+        hint = ("; the launcher process exited 0 without a DevTools endpoint: another Chrome may own this "
+                "profile directory, or the port is blocked")
+    raise ChromeError(f"Chrome DevTools endpoint on port {port} did not answer within {timeout:.0f} s ({last_err}){hint}")
+
+
+def _pid_alive(pid: int) -> bool:
+    """True while a process with this id is still running (any process, not just a child)."""
+    if sys.platform == "win32":
+        import ctypes
+
+        synchronize = 0x00100000
+        wait_timeout = 0x102
+        k32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = k32.OpenProcess(synchronize, False, int(pid))
+        if not handle:
+            return False
+        try:
+            return k32.WaitForSingleObject(handle, 0) == wait_timeout
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _log_tail(log_path: Path, limit: int = 300) -> str:
@@ -202,11 +238,14 @@ class ChromeSession:
         # between the window size and the page area, measured after launch.
         self.ui_insets: dict = {"x": 0, "y": 0 if headless else HEADED_CHROME_UI_HEIGHT}
         self.device_scale_factor: float = 1.0
+        # PID of the browser process itself (read over CDP); differs from the
+        # launcher's when Chrome detaches, e.g. Chrome 15x on Windows.
+        self.browser_pid: int | None = None
         self._closed = False
 
     @property
     def pid(self) -> int:
-        return self._proc.pid
+        return self.browser_pid or self._proc.pid
 
     def _attach(self) -> None:
         from playwright.sync_api import sync_playwright
@@ -218,6 +257,7 @@ class ChromeSession:
         pages = self.context.pages
         self.page = pages[0] if pages else self.context.new_page()
         self.cdp = self.context.new_cdp_session(self.page)
+        self.browser_pid = self._read_browser_pid()
         try:
             # Headless Chrome only finishes laying out its (invisible) window UI on the
             # first navigation away from the initial about:blank; the page area moves
@@ -230,6 +270,21 @@ class ChromeSession:
         self._fit_window_to_viewport()
         self.page.set_viewport_size({"width": int(self.viewport["width"]), "height": int(self.viewport["height"])})
         self.window_bounds = self._read_window_bounds()
+
+    def _read_browser_pid(self) -> int | None:
+        """PID of the browser process via ``SystemInfo.getProcessInfo`` (None if unavailable)."""
+        try:
+            bcdp = self.browser.new_browser_cdp_session()
+            try:
+                info = bcdp.send("SystemInfo.getProcessInfo")
+            finally:
+                bcdp.detach()
+            for entry in info.get("processInfo", []):
+                if entry.get("type") == "browser":
+                    return int(entry["id"])
+        except Exception:
+            log.debug("could not read the browser pid over CDP", exc_info=True)
+        return None
 
     def _read_scale_factor(self) -> float:
         """``window.devicePixelRatio`` before any viewport emulation: the OS backing
@@ -375,6 +430,7 @@ class ChromeSession:
             except Exception:
                 log.debug("ignored error", exc_info=True)
         self._terminate_process()
+        self._kill_detached_browser()
         # the profile holds the logged-in app session (cookies, localStorage tokens) under the
         # agent-readable output tree: remove it with the process (chrome.log stays in logs/)
         shutil.rmtree(self.profile_dir, ignore_errors=True)
@@ -391,6 +447,25 @@ class ChromeSession:
     def _close_browser(self) -> None:
         if self.browser is not None:
             self.browser.close()
+
+    def _kill_detached_browser(self) -> None:
+        """Terminate the browser process by PID when it is not the launcher's child
+        (Chrome 15x / Edge on Windows detach immediately, so terminating the launcher
+        does nothing).  ``browser.close()`` on a ``connect_over_cdp`` browser only
+        disconnects, and sending ``Browser.close`` over CDP leaves Playwright in a
+        state that stalls the next launch, so a plain process kill is used: the
+        profile is throwaway, nothing needs a graceful quit."""
+        pid = self.browser_pid
+        if not pid or pid == self._proc.pid or not _pid_alive(pid):
+            return
+        try:
+            os.kill(pid, signal.SIGTERM)  # TerminateProcess on Windows
+        except OSError:
+            log.debug("could not terminate browser pid %s", pid, exc_info=True)
+            return
+        deadline = time.monotonic() + TERMINATE_GRACE_S
+        while time.monotonic() < deadline and _pid_alive(pid):
+            time.sleep(0.1)
 
     def _stop_playwright(self) -> None:
         if self._pw is not None:

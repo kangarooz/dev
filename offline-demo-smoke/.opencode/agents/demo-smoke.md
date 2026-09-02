@@ -9,12 +9,21 @@ permission:
   websearch: deny
   doom_loop: deny
   task: deny
+  question: allow
   bash:
     "*": ask
     "python -m demo_smoke *": allow
     "python3 -m demo_smoke *": allow
     ".venv/bin/python -m demo_smoke *": allow
     '.venv\Scripts\python.exe -m demo_smoke *': allow
+    "python -m demo_smoke record-ref *": allow
+    "python -m demo_smoke devices *": allow
+    "python -m demo_smoke creds list *": allow
+    "python -m demo_smoke creds check *": allow
+    "python -m demo_smoke init-scenario *": allow
+    "python -m demo_smoke validate *": allow
+    "python -m demo_smoke inspect *": allow
+    "python -m demo_smoke check-model *": allow
     "cat *": allow
     "ls": allow
     "ls *": allow
@@ -26,10 +35,19 @@ permission:
     "python3 -m demo_smoke prefetch*": deny
     ".venv/bin/python -m demo_smoke prefetch*": deny
     '.venv\Scripts\python.exe -m demo_smoke prefetch*': deny
+    "python -m demo_smoke creds set *": deny
+    "python3 -m demo_smoke creds set *": deny
+    ".venv/bin/python -m demo_smoke creds set *": deny
+    '.venv\Scripts\python.exe -m demo_smoke creds set *': deny
     "* --online*": deny
     "rm -rf *": deny
     "del *": deny
     "git push*": deny
+  read:
+    "*": allow
+    "*.env": deny
+    "*.env.*": deny
+    "*.env.example": allow
   edit:
     "*": deny
     "demo-output/**": allow
@@ -46,8 +64,9 @@ commands below, one tool call per step, read the result file, then decide the ne
 - One command per step. Wait for it to finish. After every command, read `<out>/logs/<cmd>.json` with the read tool before you continue. On exit 3, and on exit 4 from any command except `narrate-validate`, that file contains only `error` and `exit_code`; `narrate-validate`'s exit-4 log also has `errors` (a list of problems) and `budget` (the word limit). Do not search for files; read the exact path.
 - Exit codes, with the output line that goes with them: 0 = ok. 2 = the FEATURE failed (the summary line says `FAIL`): stop and write the Report. 3 = a TOOL failed (a line starting with `error:`): stop and write the Report. 4 = bad input: only `narrate-validate` may be retried (step 4, its line starts with `narrate-validate: INVALID`); from any other command stop, quote its `error:` line in the Report, and do not edit the scenario.
 - If a command is cut off by the tool timeout (no `<cmd>:` summary line and no `error:` line came back), do not rerun it; stop and report `ERROR (stage: <cmd>, timed out)`.
-- The only file you may write is `<out>/audio/narration.json`. Never edit a scenario file unless the user explicitly asked you to write or change a scenario. Never edit anything else. Never install packages. Never use the web (`prefetch` and `--online` are denied). Never run a command that is not in this file.
-- Credentials (`DEMO_USER`, `DEMO_PASS`, ...) come from the environment the user started OpenCode in. Never put them on the command line and never ask for their values.
+- The only file you may write is `<out>/audio/narration.json`. Never edit a scenario file unless the user explicitly asked you to write or change a scenario (`/onboard` does). Never edit anything else. Never install packages. Never use the web (`prefetch` and `--online` are denied). Never run a command that is not in this file or in the command you were given.
+- Credentials (`DEMO_USER`, `DEMO_PASS`, ...) come from the environment the user started OpenCode in, or from the kit's `.env`, which you never read. Never put them on the command line and never ask for their values.
+- Onboarding commands (`/onboard`, `/clone-voice`): `record-ref`, `devices`, `creds list`, `creds check`, `init-scenario`, `validate`, `inspect` and `check-model` are allowed. `creds set` is denied for you because it needs the user's own terminal: print the exact line `python -m demo_smoke creds set NAME` for the user to run. The question tool works only in the interactive TUI; under `opencode run` it is denied, so say so and stop instead of guessing answers.
 - If the user says there is no display, or the run is unattended (a server, CI), add `--headless` to the dryrun and record commands.
 - Do not repeat a command that already succeeded. Do not guess results: read the files.
 

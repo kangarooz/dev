@@ -104,7 +104,7 @@ class FakeOpenCodeLLM:
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.port}/v1"
 
-    def start(self) -> "FakeOpenCodeLLM":
+    def start(self) -> FakeOpenCodeLLM:
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -173,7 +173,7 @@ class FakeOpenCodeLLM:
             self._thread.join(timeout=5)
             self._thread = None
 
-    def __enter__(self) -> "FakeOpenCodeLLM":
+    def __enter__(self):
         return self.start()
 
     def __exit__(self, *exc) -> None:

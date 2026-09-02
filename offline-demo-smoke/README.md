@@ -193,13 +193,17 @@ Sizes are rough for Ollama's default 4-bit quantizations; add a few GB for
 context. If the model returns text instead of a tool call, see Troubleshooting.
 
 `opencode.json` also defines `llama.cpp` (`http://127.0.0.1:8080/v1`) and
-`lmstudio` (`http://127.0.0.1:1234/v1`) providers with a single model id
-`local`, meaning whatever the server has loaded. Select with
-`--model llama.cpp/local` or `--model lmstudio/local`.
+`lmstudio` (`http://127.0.0.1:1234/v1`) providers. `llama.cpp/local` means
+whatever `llama-server` has loaded (it ignores the model id). LM Studio checks
+the id, so its entry carries a `your-model-id` placeholder: replace that key
+with the id `check-model --list` prints (see "Validate with a hosted model
+first, then go local") and select it with `--model lmstudio/<id>`.
 
-Probe any endpoint before trusting it:
+Probe any endpoint before trusting it (`--list` prints the ids the server
+serves, `--model` sends one tool-call request and reports PASS/FAIL):
 
 ```bash
+python -m demo_smoke check-model --base-url http://localhost:11434/v1 --list
 python -m demo_smoke check-model --base-url http://localhost:11434/v1 --model qwen3-coder:30b
 ```
 
@@ -291,13 +295,17 @@ pinned down in three places:
 
 - `opencode.json` - local providers (`ollama`, `llama.cpp`, `lmstudio`), default
   model `ollama/qwen3-coder:30b`, permissions (web denied, bash limited to the kit's
-  commands, edits limited to `demo-output/**`, `scenarios/*.json` and `narration.json`),
-  sharing and auto-update disabled.
+  commands with `creds set`, `prefetch` and `--online` denied outright, `.env` unreadable,
+  edits limited to `demo-output/**`, `scenarios/*.json` and `narration.json`),
+  sharing and auto-update disabled. It sets no `enabled_providers`/`disabled_providers`,
+  so the providers you authenticated in OpenCode itself stay available (see the next section).
 - `.opencode/agents/demo-smoke.md` - the **single source of truth** for the
   `demo-smoke` agent (mode, temperature, step limit, permissions and the
-  playbook prompt). `opencode.json` only points to it via `default_agent`; there is
-  no duplicate inline agent definition.
-- `.opencode/commands/*.md` - `/setup`, `/smoke`, `/narrate`, `/voice-check`.
+  playbook prompt; no pinned model, so `--model` and `/models` work). `opencode.json`
+  only points to it via `default_agent`; there is no duplicate inline agent definition.
+- `.opencode/commands/*.md` - `/setup`, `/smoke`, `/narrate`, `/voice-check`, and the
+  interactive `/onboard` and `/clone-voice` (TUI only: they use OpenCode's question tool,
+  which `opencode run` denies; see "Onboarding: voice, credentials, scenario").
 - `AGENTS.md` - short rules every session loads.
 
 Non-interactive, from the kit directory (`--command <name>` runs a custom
@@ -328,14 +336,141 @@ non-interactive use. The example scenario needs the app and `DEMO_USER` /
 Interactive TUI: run `opencode` in the kit directory. The `demo-smoke` agent is
 the default (Tab cycles agents); type `/smoke scenarios/x.json demo-output/x` and
 watch (`/narrate` needs both arguments). Use `/models` to switch to
-`llama.cpp/local` or `lmstudio/local`. `/setup` only checks the environment and
-prints the setup command for you to run; the agent never installs anything.
+`llama.cpp/local`, `lmstudio/<id>` or a hosted model. `/setup` only checks the
+environment and prints the setup command for you to run; the agent never installs
+anything. `/onboard` and `/clone-voice` ask you questions (feature, URL, login,
+steps; microphone and voice name) and only work here in the TUI.
 
 The playbook in the agent is written for small models: exact commands, one
 tool call per step, read the JSON after each command, stop on exit code 2 or 3,
 never write code. The mandated sequence is about 16-20 tool calls (8 commands,
 a log read after each, the narration write and the venv check); the agent's
 `steps: 40` leaves room for one narration retry and the report.
+
+## Validate with a hosted model first, then go local
+
+The pipeline is deterministic; the only variable is whether the model returns
+clean tool calls, many times in a row. So prove the kit once with a model you
+already trust, then switch to the local one and compare the two runs.
+`opencode.json` sets no `enabled_providers`/`disabled_providers` and the
+`demo-smoke` agent pins no model, so every provider you have logged into in
+OpenCode itself (`opencode auth list`; your global `~/.config/opencode/opencode.json`
+merges with the kit's, later files winning per key) stays available next to
+`ollama`, `llama.cpp` and `lmstudio`, and `--model provider/model` (or `/models`
+in the TUI) picks one per run.
+
+1. Hosted run, with any id `opencode models` prints (the example is Anthropic; use
+   whatever you are logged into):
+
+```bash
+opencode models                                        # every provider/model id you can use right now
+opencode run --agent demo-smoke --auto --model anthropic/claude-sonnet-4-5 --command smoke "scenarios/x.json demo-output/x-hosted"
+```
+
+```powershell
+opencode models
+opencode run --agent demo-smoke --auto --model anthropic/claude-sonnet-4-5 --command smoke "scenarios\x.json demo-output\x-hosted"
+```
+
+2. LM Studio run. Start LM Studio's server (Developer tab: **Start server**, port 1234,
+   leave "Serve on local network" **off**, turn **JIT model loading** on so the model
+   OpenCode names is loaded on first use, and set the model's context length to at
+   least 32k in its load settings: `limit.context` in `opencode.json` is only OpenCode's
+   budget, it does not change the server). Then list the ids LM Studio actually serves,
+   probe one for tool calls, put it into `opencode.json` and run:
+
+```bash
+python -m demo_smoke check-model --base-url http://127.0.0.1:1234/v1 --list           # the ids LM Studio serves, copy one
+python -m demo_smoke check-model --base-url http://127.0.0.1:1234/v1 --model <id>     # PASS = it returns tool calls
+# opencode.json -> provider.lmstudio.models: rename the "your-model-id" key to <id>, then:
+opencode run --agent demo-smoke --auto --model lmstudio/<id> --command smoke "scenarios/x.json demo-output/x-local"
+```
+
+```powershell
+python -m demo_smoke check-model --base-url http://127.0.0.1:1234/v1 --list
+python -m demo_smoke check-model --base-url http://127.0.0.1:1234/v1 --model <id>
+# opencode.json -> provider.lmstudio.models: rename the "your-model-id" key to <id>, then:
+opencode run --agent demo-smoke --auto --model lmstudio/<id> --command smoke "scenarios\x.json demo-output\x-local"
+```
+
+   `opencode models lmstudio` also shows a few ids that come from OpenCode's own
+   models.dev catalog for the `lmstudio` provider (e.g. `lmstudio/openai/gpt-oss-20b`);
+   only the ids `check-model --list` prints are actually loaded on your machine.
+   LM Studio's OpenAI endpoint supports tool calling only for models whose chat
+   template declares tools (the model card / the tool icon in LM Studio's model list);
+   `check-model --model <id>` is the source of truth, not the catalog.
+
+3. Compare the two output directories: both should hold `final/<slug>.mp4` with
+   `verify` passing, and the agent's final `Report` says `Narration: written by me`
+   when the model wrote a valid `narration.json` or `template` when it fell back.
+   The fallback also leaves a file behind, so you can check it after the fact:
+
+```bash
+ls demo-output/x-hosted/logs/narrate-template.json demo-output/x-local/logs/narrate-template.json   # exists only where the model fell back to the template
+grep -h '"valid"' demo-output/x-hosted/logs/narrate-validate.json demo-output/x-local/logs/narrate-validate.json
+```
+
+```powershell
+Test-Path demo-output\x-hosted\logs\narrate-template.json; Test-Path demo-output\x-local\logs\narrate-template.json
+Select-String '"valid"' demo-output\x-hosted\logs\narrate-validate.json, demo-output\x-local\logs\narrate-validate.json
+```
+
+   Without the agent, `python -m demo_smoke run scenarios/x.json --out demo-output/x-llm --narration llm --base-url http://127.0.0.1:1234/v1 --model <id>`
+   asks the model for the narration directly; its `report.md` then has a
+   `Narration source: llm` or `template` line and `result.json` the
+   `narration_source` key, so `grep "Narration source" demo-output/*/report.md`
+   (PowerShell: `Select-String "Narration source" demo-output\*\report.md`) compares any number of runs.
+
+### Single-machine resource budget
+
+The intended setup is one Windows laptop running LM Studio (or Ollama), OpenCode,
+the kit, Chrome and the app under test, so the LLM and Chatterbox share RAM/VRAM
+with Chrome and the app. Load the LLM once and keep it loaded for the whole run
+(LM Studio: JIT loading with a long enough auto-unload TTL; Ollama:
+`OLLAMA_KEEP_ALIVE=1h`), and let `synth` run while the LLM is idle: the agent's
+playbook already orders it that way (narration first, then `synth`, then `record`).
+Pick the TTS by GPU: NVIDIA gives `--tts turbo` on CUDA; on Windows with an AMD or
+Intel GPU PyTorch has no ROCm, so it is CPU only: `--tts nano` (git build, fast) or
+`--tts turbo` on CPU (better quality, slower). `doctor` prints `torch=<device>` and
+`tts_auto=<backend>` so you can see which case applies before a run. A model on
+another machine (say over Tailscale) is an optional variation: point
+`options.baseURL` in `opencode.json` at that host, add it to `no_proxy`, and keep
+everything else local.
+
+## Onboarding: voice, credentials, scenario
+
+A new machine needs three things. Each has a CLI you can run yourself and a slash
+command that walks you through it; `/onboard` and `/clone-voice` use OpenCode's
+question tool, which exists only in the interactive TUI (`opencode`, then the
+command), never under `opencode run`.
+
+- **Voice.** `python -m demo_smoke devices` lists microphones (and the screens
+  `--capture screen` can grab). `python -m demo_smoke record-ref --out voices/nick.wav [--device N] [--seconds 60]`
+  prints a 150-word reading passage, counts down 3-2-1, records mono 48 kHz, trims
+  silence, normalises to -3 dBFS and writes `voices/nick.wav` plus `voices/nick.json`
+  (duration, speech seconds, SNR, clipping, warnings; exit 4 when a warning fires, the
+  file is still saved). It records through `sounddevice` (`pip install sounddevice`;
+  Linux also needs `libportaudio2`) and falls back to ffmpeg's OS audio grabber.
+  `/clone-voice nick` runs devices, asks for the microphone and name, records, runs
+  `voice-check` and gives a GOOD / RE-RECORD verdict.
+- **Credentials.** `python -m demo_smoke creds set DEMO_PASS` prompts without echo and
+  writes `DEMO_PASS=...` to the kit's `.env` (mode 0600, gitignored; the value may be a
+  1Password reference such as `op://vault/item/field`, resolved at run time through the
+  `op` CLI). `creds list` prints names only; `creds check DEMO_USER DEMO_PASS` says
+  whether each resolves (environment, `.env` or `op://`; exit 4 lists the missing names).
+  Every kit command loads `.env` at start, and a variable already in the environment
+  wins. The agent may run `creds list` / `creds check`, but `creds set` is denied for it
+  (it needs your terminal) and `.env` is unreadable for it; `/onboard` prints the exact
+  `creds set` lines for you to run.
+- **Scenario.** `python -m demo_smoke init-scenario --name "Chat with Manuals" --url http://localhost:3000 --out scenarios/chat-with-manuals.json --login form --username-env DEMO_USER --password-env DEMO_PASS --step "Open the app :: see the home screen" --step "Ask :: type a question and see a cited answer"`
+  writes a valid scaffold whose steps carry a `todo` instead of selectors
+  (`--interactive` asks the same questions in the terminal). `python -m demo_smoke inspect http://localhost:3000 [--login-from scenarios/x.json] [--headless]`
+  opens the page in Chrome and prints every input, button, link and file input with a
+  stable selector, its text, placeholder and label. Fill `actions` / `expect`, delete the
+  `todo` keys, then `python -m demo_smoke validate scenarios/x.json` (exit 4 with one
+  message per problem; warns about `todo` steps, empty steps and unset credential
+  names) and `dryrun`. `/onboard` does all of this with questions and ends with the
+  `/smoke` line to run next.
 
 ## Writing a scenario
 
@@ -387,6 +522,9 @@ which step and which expectation failed, with console errors.
   chrome-profile/                   the fresh Chrome profile of the last launch (a few MB, safe to delete)
   clips/                            reserved, always empty
 ```
+
+Outside `<out>`: `voices/<name>.wav` + `voices/<name>.json` from `record-ref`, `.env`
+from `creds set` (both gitignored), and `scenarios/<slug>.json` from `init-scenario`.
 
 ## Sharing the MP4
 
@@ -441,6 +579,11 @@ company's video host; the file needs no re-encoding.
   lists the failing expectation, console errors and failed requests;
   `logs/step-NN-<id>.png` shows the screen at that moment and
   `logs/failure-<id>.html` is the page DOM at the failing step.
+- **`/onboard` or `/clone-voice` says it needs the TUI**: the question tool is denied
+  under `opencode run`; start `opencode` (no arguments) in the kit directory and type
+  the command there. **`creds set` is refused for the agent**: that is intended, run
+  `python -m demo_smoke creds set NAME` in your own terminal (the value is prompted
+  without echo and lands in `.env`, which the agent cannot read).
 - Environment variables the CLI reads: `DEMO_SMOKE_CHROME`, `DEMO_SMOKE_FFMPEG`,
   `DEMO_SMOKE_FFPROBE`, `DEMO_SMOKE_BASE_URL` / `DEMO_SMOKE_MODEL` (defaults for
   `--base-url` / `--model`), `DEMO_SMOKE_API_KEY` or `OPENAI_API_KEY` (bearer token

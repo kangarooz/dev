@@ -89,6 +89,9 @@ fi
 echo "== installing requirements.txt"
 "$VPY" -m pip install --disable-pip-version-check --quiet --upgrade pip
 "$VPY" -m pip install --disable-pip-version-check -r requirements.txt
+if ! "$VPY" -c "import sounddevice" >/dev/null 2>&1; then
+  echo "setup.sh: note: sounddevice cannot load PortAudio, so record-ref will fall back to ffmpeg; fix: apt install libportaudio2 (Debian/Ubuntu), dnf install portaudio (Fedora), brew install portaudio (macOS)" >&2
+fi
 
 # ---------------------------------------------------------------- tts (optional)
 if [ "$WITH_TTS" = 1 ]; then

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import datetime as _dt
+import ipaddress
 import json
 import logging
 import os
@@ -381,6 +382,33 @@ def _origin(url: str) -> tuple[str, str, int | None]:
     return scheme, (u.hostname or "").lower(), port or _DEFAULT_PORTS.get(scheme)
 
 
+def _is_loopback_url(url: str) -> bool:
+    """``localhost``, ``*.localhost``, ``127.0.0.0/8`` or ``::1`` as the URL's host."""
+    try:
+        host = urllib.parse.urlsplit(str(url or "")).hostname
+    except ValueError:
+        return False
+    if not host:
+        return False
+    host = host.lower().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def _remote_login_allowed() -> bool:
+    return os.environ.get("DEMO_SMOKE_ALLOW_REMOTE_LOGIN", "").strip().lower() in ("1", "true", "yes")
+
+
+def credential_names(scenario: dict) -> tuple[str, ...]:
+    """The environment variable names a scenario's login block reads (for ``chrome.launch(env_omit=...)``)."""
+    cfg = scenario.get("login") or {}
+    return tuple(str(cfg[k]) for k in ("username_env", "password_env") if cfg.get(k))
+
+
 def install_basic_auth(page, app_url: str, username: str, password: str) -> None:
     """Attach ``Authorization: Basic`` to requests for the app's own origin only.
 
@@ -404,7 +432,11 @@ def login(page, scenario: dict) -> str | None:
     """Perform the scenario login. Returns ``None`` on success, else a one-line error.
 
     Credentials come from the environment variables named by ``username_env`` /
-    ``password_env`` only, never from literal values in the scenario file.
+    ``password_env`` only (or the ``op://`` references ``.env`` deferred for them),
+    never from literal values in the scenario file.  They are only ever typed into a
+    loopback host (``localhost``, ``127.0.0.0/8``, ``::1``): a scenario file the agent
+    may write must not be able to post them anywhere else.  Set
+    ``DEMO_SMOKE_ALLOW_REMOTE_LOGIN=1`` in your own shell to log in to another host.
     """
     cfg = scenario.get("login") or {"type": "none"}
     kind = str(cfg.get("type", "none")).lower()
@@ -415,14 +447,23 @@ def login(page, scenario: dict) -> str | None:
         pass_env = cfg.get("password_env")
         if not user_env or not pass_env:
             return "login: username_env and password_env are required (credentials never come from the scenario file)"
+        if kind in ("basic", "form"):
+            app_url = scenario.get("app_url", "")
+            targets = [app_url] + ([_resolve_url(app_url, cfg.get("url") or "/")] if kind == "form" else [])
+            remote = next((t for t in targets if not _is_loopback_url(t)), None)
+            if remote is not None and not _remote_login_allowed():
+                return (f"login: {remote} is not a loopback address (localhost, 127.0.0.1, ::1); credentials are "
+                        "only typed into a local app, set DEMO_SMOKE_ALLOW_REMOTE_LOGIN=1 to allow this host")
+        values: dict[str, str] = {}
         for var in (user_env, pass_env):
-            if var not in os.environ:
-                return f"login: environment variable {var} is not set"
-        username, password = os.environ[user_env], os.environ[pass_env]
-        for var, value in ((user_env, username), (pass_env, password)):
+            value, why = dotenv.credential(var)
+            if value is None:
+                return f"login: {why}"
             if dotenv.is_op_ref(value):
                 return (f"login: {var} is an unresolved op:// reference "
                         f"(run `python -m demo_smoke creds check {var}`)")
+            values[var] = value
+        username, password = values[user_env], values[pass_env]
         if kind == "basic":
             install_basic_auth(page, scenario.get("app_url", ""), username, password)
             return None
@@ -554,7 +595,7 @@ def run_steps(page, scenario: dict, out: Path, clock=None, pacer=None, screensho
                 res["error"] = err
                 failed_reason = f"step '{res['id']}' failed"
                 try:
-                    (logs / f"failure-{_safe_name(res['id'])}.html").write_text(page.content(), encoding="utf-8")
+                    (logs / f"failure-{_safe_name(res['id'])}.html").write_text(_failure_html(page), encoding="utf-8")
                 except Exception:
                     log.debug("ignored error", exc_info=True)
             else:
@@ -563,6 +604,33 @@ def run_steps(page, scenario: dict, out: Path, clock=None, pacer=None, screensho
     finally:
         collector.detach()
     return results
+
+
+_INPUT_TAG_RE = re.compile(r"<input\b[^>]*>", re.IGNORECASE)
+_TYPE_PASSWORD_RE = re.compile(r"""\stype\s*=\s*["']?password["']?""", re.IGNORECASE)
+_VALUE_ATTR_RE = re.compile(r"""\svalue\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", re.IGNORECASE)
+
+
+def _scrub_passwords(html: str) -> str:
+    """Drop the ``value`` attribute of every ``<input type=password>`` in a DOM dump.
+
+    Frameworks with controlled inputs (React and friends) mirror what was typed into
+    the attribute, so ``page.content()`` of a login page would carry the password."""
+    def fix(m: re.Match) -> str:
+        tag = m.group(0)
+        return _VALUE_ATTR_RE.sub("", tag) if _TYPE_PASSWORD_RE.search(tag) else tag
+
+    return _INPUT_TAG_RE.sub(fix, html)
+
+
+def _failure_html(page) -> str:
+    """The page DOM for ``logs/failure-<id>.html`` with password fields emptied first."""
+    try:
+        page.evaluate("() => document.querySelectorAll('input[type=password]').forEach("
+                      "(i) => { i.value = ''; i.removeAttribute('value'); })")
+    except Exception:
+        log.debug("ignored error", exc_info=True)
+    return _scrub_passwords(page.content())
 
 
 # --------------------------------------------------------------------------- dryrun
@@ -600,7 +668,8 @@ def _launch(scenario: dict, out: Path, headless: bool):
     from demo_smoke import chrome as chrome_mod  # lazy: keeps import cycles away
 
     try:
-        return chrome_mod.launch(Path(out), scenario.get("viewport") or {}, headless=headless)
+        return chrome_mod.launch(Path(out), scenario.get("viewport") or {}, headless=headless,
+                                 env_omit=credential_names(scenario))
     except Exception as exc:
         raise DriveError(f"could not launch Chrome: {_one_line(exc)}") from exc
 

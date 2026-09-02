@@ -375,6 +375,9 @@ class ChromeSession:
             except Exception:
                 log.debug("ignored error", exc_info=True)
         self._terminate_process()
+        # the profile holds the logged-in app session (cookies, localStorage tokens) under the
+        # agent-readable output tree: remove it with the process (chrome.log stays in logs/)
+        shutil.rmtree(self.profile_dir, ignore_errors=True)
         try:
             if self._log_file is not None:
                 self._log_file.close()
@@ -435,9 +438,11 @@ def _fresh_profile_dir(out: Path, port: int) -> Path:
     return profile_dir
 
 
-def launch(out: Path, viewport: dict, headless: bool = False) -> ChromeSession:
+def launch(out: Path, viewport: dict, headless: bool = False, env_omit=()) -> ChromeSession:
     """Start Chrome with a fresh profile under ``<out>/chrome-profile`` and attach Playwright.
 
+    The profile is removed again by ``close()``.  ``env_omit`` names environment
+    variables Chrome must not inherit (the scenario's credential names).
     Raises ``ChromeError`` with a one-line message when Chrome is missing or
     does not come up.
     """
@@ -458,12 +463,14 @@ def launch(out: Path, viewport: dict, headless: bool = False) -> ChromeSession:
     log_file = open(log_path, "ab")  # noqa: SIM115 - handed to Popen, closed in close()
 
     args = chrome_args(chrome, port, profile_dir, viewport, headless)
-    env = dict(os.environ)
+    omit = set(env_omit or ())
+    env = {k: v for k, v in os.environ.items() if k not in omit}
     env.setdefault("LANG", "C.UTF-8")
     try:
         proc = subprocess.Popen(args, stdout=log_file, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env)
     except OSError as exc:
         log_file.close()
+        shutil.rmtree(profile_dir, ignore_errors=True)
         raise ChromeError(f"could not start Chrome ({chrome}): {exc}") from None
 
     session = ChromeSession(proc, chrome, port, profile_dir, viewport, headless, log_file, log_path)

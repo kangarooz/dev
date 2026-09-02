@@ -4,11 +4,12 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
 
-from demo_smoke import chrome, drive
+from demo_smoke import chrome, dotenv, drive
 
 KIT = Path(__file__).resolve().parents[1]
 APP_DIR = KIT / "tests" / "fixtures" / "app"
@@ -68,7 +69,7 @@ def test_expect_summary():
 
 def test_login_reports_missing_env(monkeypatch):
     monkeypatch.delenv("DEMO_SMOKE_MISSING_USER", raising=False)
-    scenario = {"app_url": "http://x", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER",
+    scenario = {"app_url": "http://localhost:3000", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER",
                                                   "password_env": "DEMO_SMOKE_MISSING_PASS"}}
     err = drive.login(None, scenario)
     assert err == "login: environment variable DEMO_SMOKE_MISSING_USER is not set"
@@ -78,16 +79,75 @@ def test_login_reports_missing_env(monkeypatch):
     assert "unsupported" in drive.login(None, {"login": {"type": "oauth", "username_env": "DEMO_SMOKE_MISSING_USER",
                                                          "password_env": "DEMO_SMOKE_MISSING_PASS"}})
     # literal credentials in the scenario file are refused, not silently used
-    err = drive.login(None, {"app_url": "http://x", "login": {"type": "basic", "username": "u", "password": "p"}})
+    err = drive.login(None, {"app_url": "http://localhost:3000", "login": {"type": "basic", "username": "u", "password": "p"}})
     assert err == "login: username_env and password_env are required (credentials never come from the scenario file)"
-    err = drive.login(None, {"app_url": "http://x", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER"}})
+    err = drive.login(None, {"app_url": "http://localhost:3000", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER"}})
     assert "username_env and password_env are required" in err
     # an op:// reference that reached the environment unresolved is not typed into the app
     monkeypatch.setenv("DEMO_SMOKE_MISSING_PASS", "op://Private/Legion/password")
-    err = drive.login(None, {"app_url": "http://x", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER",
+    err = drive.login(None, {"app_url": "http://localhost:3000", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER",
                                                              "password_env": "DEMO_SMOKE_MISSING_PASS"}})
     assert err == ("login: DEMO_SMOKE_MISSING_PASS is an unresolved op:// reference "
                    "(run `python -m demo_smoke creds check DEMO_SMOKE_MISSING_PASS`)")
+
+
+def test_login_refuses_non_loopback_hosts_unless_allowed(monkeypatch):
+    """A scenario file the agent may write must not be able to post the credentials anywhere."""
+    monkeypatch.setenv("DEMO_SMOKE_USER", "u")
+    monkeypatch.setenv("DEMO_SMOKE_PASS", "p")
+    monkeypatch.delenv("DEMO_SMOKE_ALLOW_REMOTE_LOGIN", raising=False)
+    basic = {"type": "basic", "username_env": "DEMO_SMOKE_USER", "password_env": "DEMO_SMOKE_PASS"}
+    err = drive.login(None, {"app_url": "http://app.example.com", "login": basic})
+    assert err.startswith("login: http://app.example.com is not a loopback address")
+    assert "DEMO_SMOKE_ALLOW_REMOTE_LOGIN=1" in err and "\n" not in err
+    # a form whose login page lives on another host is refused as well
+    err = drive.login(None, {"app_url": "http://localhost:3000",
+                             "login": {**basic, "type": "form", "url": "https://sso.example.com/login"}})
+    assert "https://sso.example.com/login is not a loopback address" in err
+    assert "is not a loopback" in drive.login(None, {"app_url": "http://10.0.0.5:3000", "login": basic})
+
+    class FakePage:
+        def __init__(self):
+            self.routes = []
+
+        def route(self, pattern, handler):
+            self.routes.append(pattern)
+
+    for url in ("http://localhost:3000", "http://127.0.0.1:8765", "http://127.1.2.3", "http://[::1]:3000",
+                "http://app.localhost", "http://LOCALHOST"):
+        page = FakePage()
+        assert drive.login(page, {"app_url": url, "login": basic}) is None, url
+        assert page.routes == ["**/*"]
+    monkeypatch.setenv("DEMO_SMOKE_ALLOW_REMOTE_LOGIN", "1")
+    page = FakePage()
+    assert drive.login(page, {"app_url": "http://app.example.com", "login": basic}) is None
+    assert drive.credential_names({"login": basic}) == ("DEMO_SMOKE_USER", "DEMO_SMOKE_PASS")
+    assert drive.credential_names({"login": {"type": "none"}}) == ()
+
+
+def test_login_resolves_a_deferred_op_reference_without_exporting_it(monkeypatch):
+    monkeypatch.setenv("DEMO_SMOKE_USER", "u")
+    monkeypatch.delenv("DEMO_SMOKE_DEF_PASS", raising=False)
+    monkeypatch.setattr(dotenv, "resolve_op", lambda ref: "pw-for-" + ref)
+    dotenv.forget_deferred()
+    dotenv.load_env.deferred["DEMO_SMOKE_DEF_PASS"] = "op://v/i/p"
+    seen = {}
+    monkeypatch.setattr(drive, "install_basic_auth", lambda page, url, user, pw: seen.update(user=user, pw=pw))
+    scenario = {"app_url": "http://localhost:3000",
+                "login": {"type": "basic", "username_env": "DEMO_SMOKE_USER", "password_env": "DEMO_SMOKE_DEF_PASS"}}
+    assert drive.login(None, scenario) is None
+    assert seen == {"user": "u", "pw": "pw-for-op://v/i/p"}
+    assert "DEMO_SMOKE_DEF_PASS" not in os.environ
+    dotenv.forget_deferred()
+    err = drive.login(None, scenario)
+    assert err == "login: environment variable DEMO_SMOKE_DEF_PASS is not set"
+
+
+def test_scrub_passwords_drops_only_password_values():
+    html = ('<input type="text" value="alice"><INPUT id=p type=password value="s3cret-9x">'
+            "<input value='s3cret-9x' type='password'><input type=\"password\" value=s3cret-9x>")
+    out = drive._scrub_passwords(html)
+    assert "s3cret-9x" not in out and 'value="alice"' in out and "id=p" in out
 
 
 def test_origin_comparison_fills_default_ports():
@@ -118,6 +178,8 @@ def test_dryrun_pass(tmp_path):
     for name in ("step-01-open.png", "step-02-upload.png", "step-03-ask.png", "after-ask.png", "dryrun.json"):
         assert (logs / name).exists(), name
     assert not list(logs.glob("failure-*.html"))
+    # the Chrome profile (cookies, localStorage of the app session) does not outlive the run
+    assert not list(tmp_path.glob("chrome-profile*")) and (logs / "chrome.log").exists()
     md = (logs / "smoke-results.md").read_text(encoding="utf-8")
     assert "**PASS**" in md
     assert "| ask |" in md
@@ -155,6 +217,45 @@ def test_dryrun_fail_captures_failure_context(tmp_path):
     md = (logs / "smoke-results.md").read_text(encoding="utf-8")
     assert "**FAIL**" in md and "No manuals uploaded" in md and "/api/answer" in md
     assert "attempt 1 failed" in md and "attempt 2 failed" in md
+
+
+def test_failure_html_never_holds_a_typed_password(tmp_path):
+    """Frameworks with controlled inputs mirror the typed value into the attribute; the DOM dump
+    written for a failing step must not carry it (the agent may read failure-*.html)."""
+    _need_chrome()
+    site = tmp_path / "site"
+    site.mkdir()
+    (site / "index.html").write_text(
+        "<!doctype html><title>Mirror</title><h1>Sign in</h1>"
+        '<input id="u" type="text"><input id="p" type="password">'
+        '<script>document.getElementById("p").addEventListener("input", function (e) {'
+        ' e.target.setAttribute("value", e.target.value); });</script>', encoding="utf-8")
+    scenario = {"steps": [{"id": "typing", "title": "type", "timeout_s": 2,
+                           "actions": [{"goto": "/index.html"}, {"fill": {"selector": "#p", "text": "hunter2-Xq9"}}],
+                           "expect": [{"text": "never on this page"}]}]}
+    with _serve_dir()(site) as base:
+        scenario["app_url"] = base
+        result = drive.dryrun(scenario, tmp_path / "out", headless=True)
+    assert result["verdict"] == "FAIL"
+    html = (tmp_path / "out" / "logs" / "failure-typing.html").read_text(encoding="utf-8")
+    assert "hunter2-Xq9" not in html and 'id="p"' in html and "Sign in" in html
+
+
+def test_launch_keeps_credential_names_out_of_chrome_env(tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_popen(args, **kw):
+        seen["env"] = kw["env"]
+        raise OSError("not today")
+
+    monkeypatch.setattr(chrome.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(chrome, "find_chrome", lambda: sys.executable)
+    monkeypatch.setenv("DEMO_SMOKE_SECRET_X", "s3cret")
+    monkeypatch.setenv("DEMO_SMOKE_PLAIN_Y", "keep")
+    with pytest.raises(chrome.ChromeError, match="could not start Chrome"):
+        chrome.launch(tmp_path, {}, headless=True, env_omit=("DEMO_SMOKE_SECRET_X",))
+    assert "DEMO_SMOKE_SECRET_X" not in seen["env"] and seen["env"]["DEMO_SMOKE_PLAIN_Y"] == "keep"
+    assert not list(tmp_path.glob("chrome-profile*"))       # a failed launch leaves no profile behind
 
 
 def test_dryrun_login_form(tmp_path, monkeypatch):

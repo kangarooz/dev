@@ -13,8 +13,8 @@ Knobs live in ``config`` (call ``reset()`` between tests):
 * ``speech_seconds`` how much of the take contains speech (default: everything but the padding)
 * ``pad_s``          silence on each side (default 1.0)
 * ``fail``           make ``rec`` raise PortAudioError (to exercise the ffmpeg fallback)
-* ``rate_ok``        when set, ``rec`` raises PortAudioError unless ``samplerate`` equals it
-                     (a 44.1 kHz-only USB microphone on CoreAudio)
+* ``rate_ok``        when set, ``rec`` and ``InputStream`` raise PortAudioError unless
+                     ``samplerate`` equals it (a 44.1 kHz-only USB microphone on CoreAudio)
 * ``seed``           RNG seed
 
 ``InputStream`` records every open in ``primed`` (record-ref primes the input once
@@ -86,6 +86,8 @@ class InputStream:
         primed.append({"samplerate": samplerate, "channels": channels, "dtype": dtype, "device": device})
         if config.get("fail"):
             raise PortAudioError("Error opening InputStream: Invalid device (fake)")
+        if config.get("rate_ok") and int(samplerate or 0) != int(config["rate_ok"]):
+            raise PortAudioError(f"Error opening InputStream: Invalid sample rate (fake, wants {config['rate_ok']})")
 
     def __enter__(self):
         return self

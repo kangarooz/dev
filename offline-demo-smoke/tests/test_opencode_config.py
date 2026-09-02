@@ -38,6 +38,9 @@ KIT_BASH_ALLOW = [
 KIT_BASH_DENY = ["rm -rf *", "del *", "git push*",
                  # .env is denied to the read tool; these keep bash from reopening it
                  "cat *.env*", "type *.env*", "* .env*", "printenv*", "env", "set", "export",
+                 "env *", "export *", "set *", "declare*", "*/.env*",
+                 # a scenario the agent wrote must not read another .env, nor lift the loopback-only login
+                 "* --env-file*", "*DEMO_SMOKE_ALLOW_REMOTE_LOGIN*",
                  # the two kit commands that reach the network are denied even under --auto
                  "python -m demo_smoke prefetch*", "python3 -m demo_smoke prefetch*",
                  ".venv/bin/python -m demo_smoke prefetch*", ".venv\\Scripts\\python.exe -m demo_smoke prefetch*",
@@ -316,6 +319,9 @@ def test_readme_mentions_key_paths():
 def test_ignore_file_reincludes_outputs():
     text = (KIT / ".ignore").read_text(encoding="utf-8")
     assert "!demo-output/" in text.splitlines()
+    # ripgrep honours .gitignore only inside a git checkout; .ignore hides .env from grep/glob everywhere
+    for line in (".env", ".env.*", "!.env.example", ".envrc"):
+        assert line in text.splitlines(), line
     assert (KIT / "scenarios" / "fixtures" / "osha-1910.pdf").is_file()
     assert (KIT / "requirements-dev.txt").is_file()
 

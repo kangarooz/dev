@@ -295,6 +295,20 @@ def test_creds_set_is_denied(rulesets, interpreter, tail):
     "set",
     "export",
     "cp .env demo-output/x.txt",
+    # variants of the env/set/export/.env rules that the literal patterns alone would miss
+    "export -p",
+    "export DEMO_PASS=x",
+    "declare -x",
+    "declare -p",
+    "env -0",
+    "set -o posix",
+    "head ./.env",
+    "less ./.env",
+    "cat ${PWD}/.env",
+    # another .env, or a remote login target, is never the agent's to choose
+    "python -m demo_smoke dryrun scenarios/x.json --env-file ~/other/.env",
+    "python -m demo_smoke inspect http://x --login-from scenarios/x.json --env-file /home/me/.env",
+    "DEMO_SMOKE_ALLOW_REMOTE_LOGIN=1 python -m demo_smoke dryrun scenarios/x.json --out demo-output/x",
 ])
 def test_denied_commands(rulesets, cmd):
     assert bash_action(rulesets, cmd, windows="\\" in cmd) == "deny"

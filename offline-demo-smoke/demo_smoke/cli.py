@@ -634,14 +634,17 @@ def _load_dotenv(argv: list[str] | None) -> None:
     """Export ``<kit>/.env`` (and ``--env-file``) into ``os.environ`` for names not already set.
 
     Runs before the parser is built so ``DEMO_SMOKE_BASE_URL`` / ``DEMO_SMOKE_MODEL`` from
-    ``.env`` also satisfy the required flags.  ``op://`` values are resolved through the
-    1Password CLI; a failure is one stderr line, never a crash (``creds check`` explains it).
+    ``.env`` also satisfy the required flags.  ``op://`` values are not resolved here:
+    ``dotenv.load_env`` defers them and ``drive.login`` resolves only the two names a
+    scenario's login block uses, when it runs (no vault unlock for doctor/synth/record,
+    and the secret is never in the environment Chrome or ffmpeg inherit).
     ``--help`` / ``--version`` skip it (no point unlocking a vault to print usage), and so do
     the ``creds`` subcommands: they take ``--env-file`` and resolve names themselves, so
     ``creds check`` reports the real source (``.env`` / ``op://``) and ``creds set`` never
     runs ``op`` for an unrelated name.
     """
     argv = list(sys.argv[1:] if argv is None else argv)
+    dotenv.forget_deferred()
     if not argv or any(a in ("-h", "--help", "--version") for a in argv):
         return
     if next((a for a in argv if not a.startswith("-")), None) == "creds":
@@ -658,12 +661,9 @@ def _load_dotenv(argv: list[str] | None) -> None:
     files.append(None)   # the kit's own .env (a missing file is a no-op)
     for f in files:
         try:
-            dotenv.load_env(f)
+            dotenv.load_env(f, resolve_refs=False)
         except Exception as e:  # noqa: BLE001 - a broken .env must not block any command
             _err(f"could not load {dotenv.env_path(f)}: {e}")
-            continue
-        for name, why in dotenv.load_env.unresolved.items():
-            _err(f"{name}: not exported, unresolved op:// reference ({why})")
 
 
 def main(argv: list[str] | None = None) -> int:

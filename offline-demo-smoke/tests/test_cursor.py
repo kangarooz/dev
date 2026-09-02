@@ -82,7 +82,7 @@ def test_chrome_session_bounds_and_clean_close(tmp_path):
         session.close()
     session.close()  # idempotent
     assert session._proc.poll() is not None, "Chrome process should be gone after close()"
-    assert (tmp_path / "chrome-profile").exists(), "close() must not delete the profile dir"
+    assert not (tmp_path / "chrome-profile").exists(), "close() removes the profile (it holds the app session)"
     assert (tmp_path / "logs" / "chrome.log").exists()
 
 

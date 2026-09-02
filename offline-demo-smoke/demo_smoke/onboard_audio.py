@@ -2,8 +2,9 @@
 
 ``record-ref`` resolves the recording backend first (sounddevice/PortAudio, or
 ffmpeg's OS audio grabber: dshow / avfoundation / pulse / alsa) and opens the
-input once so driver start-up and the macOS microphone prompt happen before
-anyone starts reading; then it prints the reading passage (``passage.txt``) in
+input once (a PortAudio stream, or a half-second ffmpeg capture) so driver
+start-up and the macOS microphone prompt happen before anyone starts reading;
+then it prints the reading passage (``passage.txt``) in
 three chunks, counts down 3-2-1, records mono 48 kHz for ``--seconds``, peak-
 normalises to -3 dBFS, trims leading and trailing silence at -40 dBFS (200 ms
 padding), writes a PCM16 WAV plus a ``<name>.json`` sidecar with stats and
@@ -33,6 +34,7 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -45,6 +47,7 @@ EXIT_INTERRUPTED = 130
 
 SAMPLE_RATE = 48000
 DEFAULT_SECONDS = 60.0
+PRIME_SECONDS = 0.5        # ffmpeg warm-up capture before the passage (permission prompt, driver start)
 TRIM_DB = -40.0            # silence threshold for leading/trailing trim
 TRIM_PAD_S = 0.2           # keep this much around the first/last speech frame
 TARGET_PEAK_DB = -3.0      # peak normalisation target
@@ -147,7 +150,8 @@ def passage_chunks(text: str | None = None, n: int = 3) -> list[str]:
         words = len(s.split())
         # start the next part when adding this sentence would overshoot the boundary
         # by more than stopping here undershoots it (never leave a part empty)
-        if i < n - 1 and chunks[i]:
+        # (a one- or two-word sentence such as "Good." belongs to the sentence before it)
+        if i < n - 1 and chunks[i] and words > 2:
             target = total * (i + 1) / n
             if abs(count + words - target) > abs(count - target):
                 i += 1
@@ -539,15 +543,22 @@ def prime_input(sd, device: int | None = None, sr: int = SAMPLE_RATE) -> bool:
     stream_cls = getattr(sd, "InputStream", None)
     if stream_cls is None:
         return False
-    kw = {"samplerate": sr, "channels": 1, "dtype": "float32"}
-    if device is not None:
-        kw["device"] = device
-    try:
-        with stream_cls(**kw):
-            pass
-        return True
-    except Exception:  # noqa: BLE001 - the real attempt below reports the error
-        return False
+    rates = [sr]
+    for rate in rates:
+        kw = {"samplerate": rate, "channels": 1, "dtype": "float32"}
+        if device is not None:
+            kw["device"] = device
+        try:
+            with stream_cls(**kw):
+                pass
+            return True
+        except Exception:  # noqa: BLE001 - the real attempt below reports the error
+            # a 44.1 kHz-only CoreAudio microphone refuses 48 kHz: retry once at its own rate,
+            # exactly like record_sounddevice does, so the prompt still lands before the reading
+            native = _device_default_rate(sd, device)
+            if len(rates) == 1 and native and native != sr:
+                rates.append(native)
+    return False
 
 
 def record_sounddevice(seconds: float, device: int | None = None, sr: int = SAMPLE_RATE,
@@ -622,9 +633,11 @@ def ffmpeg_error_summary(stderr: str, returncode: int) -> str:
 
 def record_ffmpeg(seconds: float, out_path: Path, device: str | None = None, os_name: str | None = None,
                   ffmpeg: str | None = None, sr: int = SAMPLE_RATE,
-                  candidates: list | None = None) -> tuple[np.ndarray, str]:
-    """Record via ffmpeg into ``<out>.raw.wav`` and load it; returns (audio, "<fmt>:<device>").
+                  candidates: list | None = None) -> tuple[np.ndarray, str, int]:
+    """Record via ffmpeg into ``<out>.raw.wav`` and load it; returns (audio, "<fmt>:<device>", native rate).
 
+    The audio is always at ``sr``; the third value is the rate ffmpeg actually wrote
+    (it differs when ffmpeg ignored ``-ar`` and the capture was resampled here).
     ``candidates`` (from ``prepare_capture``) skips the device listing here."""
     import soundfile as sf
 
@@ -659,7 +672,7 @@ def record_ffmpeg(seconds: float, out_path: Path, device: str | None = None, os_
                 _unlink(tmp)
             if got_sr != sr:
                 data = _resample(data[:, 0], got_sr, sr).reshape(-1, 1)
-            return data, f"{fmt}:{dev or 'default'}"
+            return data, f"{fmt}:{dev or 'default'}", int(got_sr)
         tried.append(f"{fmt}: {ffmpeg_error_summary(cp.stderr, cp.returncode)}")
         _unlink(tmp)
     if not tried:
@@ -674,17 +687,34 @@ def _unlink(p: Path) -> None:
         pass
 
 
+def _lowpass(x: np.ndarray, cutoff: float, taps: int) -> np.ndarray:
+    """Hann-windowed sinc FIR low-pass (``cutoff`` in cycles per sample), zero phase."""
+    n = np.arange(taps) - (taps - 1) / 2.0
+    h = 2.0 * cutoff * np.sinc(2.0 * cutoff * n) * np.hanning(taps)
+    h /= h.sum()
+    return np.convolve(x, h, mode="same")
+
+
 def _resample(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
-    """Linear resampling (only reached when ffmpeg ignored ``-ar``)."""
+    """Resample ``x`` from ``sr_in`` to ``sr_out`` by linear interpolation.
+
+    Reached from ``record_sounddevice`` (the retry at the device's native rate) and from
+    ``record_ffmpeg`` (ffmpeg ignored ``-ar``).  When the rate goes down the signal is
+    low-passed first (cutoff 0.45 x ``sr_out``), so a 96 kHz interface does not alias
+    its top octave into the 48 kHz take; upsampling (44.1 -> 48 kHz) needs no filter."""
+    x = np.asarray(x, dtype=np.float64).reshape(-1)
     n_out = round(x.size * sr_out / float(sr_in))
     if x.size < 2 or n_out < 2:
         return np.asarray(x, dtype=np.float32)
+    if sr_out < sr_in:
+        x = _lowpass(x, 0.45 * sr_out / sr_in, 2 * int(24 * sr_in / sr_out) + 1)
     src = np.linspace(0.0, 1.0, x.size)
     dst = np.linspace(0.0, 1.0, n_out)
     return np.interp(dst, src, x).astype(np.float32)
 
 
-def prepare_capture(backend: str, device: str | None, os_name: str | None = None) -> dict:
+def prepare_capture(backend: str, device: str | None, os_name: str | None = None,
+                    show_countdown: bool = True) -> dict:
     """Resolve the backend *before* the passage and the countdown; returns a plan for ``run_capture``.
 
     ``auto`` = sounddevice when it imports (the input is primed once so the macOS
@@ -696,7 +726,8 @@ def prepare_capture(backend: str, device: str | None, os_name: str | None = None
     if device is not None and re.fullmatch(r"-?\d+", str(device).strip()):
         sd_device = int(str(device).strip())
     plan: dict = {"requested": backend, "backend": None, "sd": None, "sd_device": sd_device, "device": device,
-                  "os_name": os_name, "ffmpeg": None, "candidates": None, "ffmpeg_device": None, "errors": []}
+                  "os_name": os_name, "ffmpeg": None, "candidates": None, "ffmpeg_device": None, "errors": [],
+                  "countdown": show_countdown}
     if backend in ("auto", "sounddevice"):
         if device is None or sd_device is not None:
             sd, note = _import_sounddevice_detail()
@@ -722,20 +753,51 @@ def _prepare_ffmpeg(plan: dict) -> None:
     if not ffmpeg:
         raise RecordError("; ".join(plan["errors"]
                                     + ["ffmpeg not found (set DEMO_SMOKE_FFMPEG or pip install imageio-ffmpeg)"]))
-    # A numeric --device is a sounddevice (PortAudio) index; ffmpeg's dshow / avfoundation /
-    # pulse namespaces would read the same number as something else, so ffmpeg records from
-    # the OS default input instead.
-    dev = None if plan["sd_device"] is not None else plan["device"]
+    if plan["requested"] == "ffmpeg":
+        # --backend ffmpeg: --device is the user's ffmpeg device, a name or (avfoundation / pulse) an index
+        dev = plan["device"]
+    else:
+        # Automatic fallback: a numeric --device is a sounddevice (PortAudio) index; ffmpeg's dshow /
+        # avfoundation / pulse namespaces would read the same number as something else, so ffmpeg
+        # records from the OS default input instead.
+        dev = None if plan["sd_device"] is not None else plan["device"]
     candidates = ffmpeg_candidates(plan["os_name"], dev, ffmpeg)
     if not candidates:
         raise RecordError("; ".join(plan["errors"]
                                     + ["ffmpeg: no dshow audio device listed (run `devices`, or pass --device NAME)"]))
-    plan.update({"backend": "ffmpeg", "ffmpeg": ffmpeg, "candidates": candidates, "ffmpeg_device": dev})
     if dev is None and plan["device"] is not None:
         _say(f"  --device {plan['device']} is a sounddevice index, not an ffmpeg device: "
              "ffmpeg records from the OS default input")
     elif dev is None and candidates[0][0] == "dshow":
         _say(f"  ffmpeg: recording from dshow device {candidates[0][1]!r}")
+    opened = _prime_ffmpeg(ffmpeg, candidates)
+    if opened is not None:
+        # the format that opened goes first, so the take does not start with a failing attempt
+        candidates = [opened] + [c for c in candidates if c != opened]
+        _say(f"  backend: ffmpeg ({opened[0]} input opened)")
+    else:
+        _say("  backend: ffmpeg")
+    plan.update({"backend": "ffmpeg", "ffmpeg": ffmpeg, "candidates": candidates, "ffmpeg_device": dev})
+
+
+def _prime_ffmpeg(ffmpeg: str, candidates: list) -> tuple | None:
+    """Open the ffmpeg input once (a ``PRIME_SECONDS`` capture to a temp file) before the passage.
+
+    Like ``prime_input`` for sounddevice: the first process that touches the microphone
+    triggers the macOS permission dialog and the driver start-up, which must not happen
+    while the user is already reading.  Returns the first ``(fmt, device)`` that recorded,
+    or None when none did (the real attempt then reports the errors).  Never raises."""
+    probe = Path(tempfile.gettempdir()) / f"demo-smoke-prime-{os.getpid()}.wav"
+    for fmt, dev in candidates:
+        try:
+            cp = _run_record(ffmpeg_record_args(ffmpeg, fmt, dev, PRIME_SECONDS, probe, SAMPLE_RATE), timeout=30)
+            ok = cp.returncode == 0 and probe.is_file()
+        except Exception:  # noqa: BLE001 - timeouts, OSError, bad arguments: the real attempt reports them
+            ok = False
+        _unlink(probe)
+        if ok:
+            return (fmt, dev)
+    return None
 
 
 def run_capture(plan: dict, seconds: float, out_path: Path) -> tuple[np.ndarray, str, int]:
@@ -751,10 +813,12 @@ def run_capture(plan: dict, seconds: float, out_path: Path) -> tuple[np.ndarray,
             _say(f"  sounddevice failed ({e}); falling back to ffmpeg")
             _prepare_ffmpeg(plan)
             _say("  Recording with ffmpeg now: start reading again from part 1.")
+            countdown(plan.get("countdown", True))
+            _say("  Recording... speak now.")
     try:
-        data, used = record_ffmpeg(seconds, out_path, plan["ffmpeg_device"], plan["os_name"], plan["ffmpeg"],
-                                   candidates=plan["candidates"])
-        return data, f"ffmpeg ({used})", SAMPLE_RATE
+        data, used, native = record_ffmpeg(seconds, out_path, plan["ffmpeg_device"], plan["os_name"], plan["ffmpeg"],
+                                           candidates=plan["candidates"])
+        return data, f"ffmpeg ({used})", native
     except RecordError as e:
         plan["errors"].append(str(e))
     raise RecordError("; ".join(plan["errors"]))
@@ -786,7 +850,7 @@ def record_ref(out: Path, seconds: float = DEFAULT_SECONDS, device: str | None =
                backend: str = "auto", show_countdown: bool = True, os_name: str | None = None) -> dict:
     """Full record-ref flow; returns the sidecar dict (with ``exit_code``).  Raises RecordError."""
     out = Path(out)
-    plan = prepare_capture(backend, device, os_name)   # imports, listings, mic permission: before the reading
+    plan = prepare_capture(backend, device, os_name, show_countdown)   # imports, listings, mic permission: before the reading
     chunks = passage_chunks()
     print_passage(chunks)
     _say(f"Recording {seconds:g} s of mono {SAMPLE_RATE // 1000} kHz audio"
@@ -900,7 +964,8 @@ def register(subparsers, run_map: dict) -> None:
                     help="WAV to write (stats go next to it as NAME.json)")
     sp.add_argument("--seconds", type=float, default=DEFAULT_SECONDS, help="recording length (default 60)")
     sp.add_argument("--device", default=None,
-                    help="sounddevice input index (see `devices`), or an ffmpeg device name/index")
+                    help="sounddevice input index (see `devices`); a name forces the ffmpeg backend; "
+                         "with --backend ffmpeg the value (name or index) is passed to ffmpeg as is")
     sp.add_argument("--backend", choices=BACKENDS, default="auto",
                     help="auto = sounddevice, then ffmpeg (dshow/avfoundation/pulse/alsa)")
     sp.add_argument("--list-devices", action="store_true", help="list audio inputs and exit")

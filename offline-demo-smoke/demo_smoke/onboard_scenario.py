@@ -613,13 +613,14 @@ def inspect_url(url: str, out: Path, headless: bool = False, login_from: str | N
     if login_from:
         scen = scenario_mod.load(login_from)
         viewport = scen.get("viewport") or viewport
-        dotenv.load_env(env_file)
+        dotenv.load_env(env_file, resolve_refs=False)
         if not re.match(r"^[a-z][a-z0-9+.-]*:", url, re.IGNORECASE):
             url = drive_mod._resolve_url(scen.get("app_url", ""), url)
     if not URL_RE.match(url):
         raise OnboardError(f"URL must be http(s), got {url!r}")
     t0 = time.time()
-    session = chrome_mod.launch(Path(out), viewport, headless=headless)
+    session = chrome_mod.launch(Path(out), viewport, headless=headless,
+                                env_omit=drive_mod.credential_names(scen) if scen else ())
     try:
         page = session.page
         if scen is not None:

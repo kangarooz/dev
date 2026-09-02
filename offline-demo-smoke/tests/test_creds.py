@@ -167,17 +167,19 @@ def test_creds_list_empty(env_file: Path, capsys):
 
 def test_creds_check_environment_then_env_file(monkeypatch, env_file: Path, capsys):
     env_file.parent.mkdir(parents=True)
-    env_file.write_text("FROM_FILE=1\nSHADOWED=file\n", encoding="utf-8")
-    monkeypatch.setenv("FROM_ENV", "x")
-    monkeypatch.setenv("SHADOWED", "env")
+    env_file.write_text("FROM_FILE=VALUE_FROM_FILE_7f2\nSHADOWED=SHADOW_FILE_4d0\n", encoding="utf-8")
+    monkeypatch.setenv("FROM_ENV", "VALUE_FROM_ENV_9c1")
+    monkeypatch.setenv("SHADOWED", "SHADOW_ENV_4d0")
     monkeypatch.delenv("FROM_FILE", raising=False)
     assert run("creds", "check", "FROM_ENV", "FROM_FILE", "SHADOWED", "--env-file", env_file) == 0
-    out = capsys.readouterr().out
+    cap = capsys.readouterr()
+    out = cap.out
     assert "FROM_ENV: ok (environ)" in out
     assert "FROM_FILE: ok (.env)" in out
     assert "SHADOWED: ok (environ)" in out
     assert "creds: ok 3/3" in out
-    assert "file" not in out.replace("FROM_FILE", "").replace(".env", "") or True  # values never shown
+    for secret in ("VALUE_FROM_FILE_7f2", "VALUE_FROM_ENV_9c1", "SHADOW_FILE_4d0", "SHADOW_ENV_4d0"):
+        assert secret not in out and secret not in cap.err     # values never shown
 
 
 def test_creds_check_missing_lists_names_exit_4(monkeypatch, env_file: Path, capsys):
@@ -253,6 +255,50 @@ def test_load_env_does_not_export_an_unresolved_reference(no_op, monkeypatch, en
     assert "DEMO_PASS" not in os.environ and os.environ["DEMO_USER"] == "alice"
     assert "DEMO_PASS" in dotenv.load_env.unresolved
     assert "not on PATH" in dotenv.load_env.unresolved["DEMO_PASS"]
+
+
+def test_load_env_defers_op_references_for_login(fake_op, monkeypatch, env_file: Path):
+    """cli.main loads .env with resolve_refs=False: plain values are exported, op:// values are
+    resolved by dotenv.credential only when drive.login asks, in this process, never exported."""
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text("DEMO_USER=alice\nDEMO_PASS=op://Private/Legion/password\n", encoding="utf-8")
+    for name in ("DEMO_USER", "DEMO_PASS"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    dotenv.forget_deferred()
+    assert dotenv.load_env(env_file, resolve_refs=False) == {"DEMO_USER": "alice"}
+    assert os.environ["DEMO_USER"] == "alice" and "DEMO_PASS" not in os.environ
+    assert dotenv.load_env.deferred == {"DEMO_PASS": "op://Private/Legion/password"}
+    assert dotenv.load_env.unresolved == {}
+    assert dotenv.credential("DEMO_USER") == ("alice", None)
+    assert dotenv.credential("DEMO_PASS") == ("resolved:op://Private/Legion/password", None)
+    assert "DEMO_PASS" not in os.environ                        # resolved for this process only
+    value, why = dotenv.credential("NOPE_Q")
+    assert value is None and why == "environment variable NOPE_Q is not set"
+    monkeypatch.setenv("FAKE_OP_FAIL", "vault locked")
+    assert dotenv.credential("DEMO_PASS")[0] == "resolved:op://Private/Legion/password"   # cached: one op read
+    dotenv.forget_deferred()
+    dotenv.load_env(env_file, resolve_refs=False)
+    value, why = dotenv.credential("DEMO_PASS")
+    assert value is None and "vault locked" in why and "creds check DEMO_PASS" in why
+    dotenv.forget_deferred()
+
+
+def test_commands_without_a_login_never_touch_the_vault(fake_op, monkeypatch, env_file: Path, capsys,
+                                                         tmp_path: Path):
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text("DEMO_PASS=op://Private/Legion/password\n", encoding="utf-8")
+    monkeypatch.setenv("DEMO_PASS", "")
+    monkeypatch.delenv("DEMO_PASS")
+    monkeypatch.setenv("FAKE_OP_FAIL", "vault locked")        # any `op read` would fail loudly
+    scen = tmp_path / "s.json"
+    assert cli.main(["init-scenario", "--name", "Quiet", "--url", "http://localhost:1", "--out", str(scen)]) == 0
+    assert cli.main(["validate", str(scen), "--env-file", str(env_file)]) == 0
+    cap = capsys.readouterr()
+    assert "vault locked" not in cap.err and "unresolved" not in cap.err
+    assert "DEMO_PASS" not in os.environ
+    assert dotenv.load_env.deferred == {"DEMO_PASS": "op://Private/Legion/password"}
+    dotenv.forget_deferred()
 
 
 def test_creds_via_cli_report_the_real_source_and_skip_env_loading(fake_op, monkeypatch, env_file: Path, capsys):

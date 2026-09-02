@@ -80,6 +80,11 @@ The setup scripts take more options than shown above: `--python PATH`, `--base-u
 `-NoDoctor`, `-TorchIndex`, `-TorchVersion`); `bash scripts/setup.sh --help` /
 `Get-Help scripts\setup.ps1 -Detailed` list them.
 
+OpenCode's grep, glob and `@` file-picker tools need ripgrep: install it (`apt` / `brew` /
+`winget install ripgrep`) or run one search in the OpenCode TUI once while online, which
+downloads `rg` into `~/.cache/opencode/bin`. The kit's playbooks never search, so this only
+matters when you use those tools yourself offline.
+
 `prefetch` is the step people forget: Chatterbox downloads its weights on first
 use, and the kit runs with `HF_HUB_OFFLINE=1` by default, so an un-prefetched
 machine fails offline with a clear message. With `--tts` the setup scripts run
@@ -340,7 +345,11 @@ watch (`/narrate` needs both arguments). Use `/models` to switch to
 `llama.cpp/local`, `lmstudio/<id>` or a hosted model. `/setup` only checks the
 environment and prints the setup command for you to run; the agent never installs
 anything. `/onboard` and `/clone-voice` ask you questions (feature, URL, login,
-steps; microphone and voice name) and only work here in the TUI.
+steps; microphone and voice name) and only work here in the TUI. Export
+`OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=1200000` in the shell before running
+`opencode`, exactly as for `opencode run`: the TUI has the same 120 s default bash
+timeout, and the playbooks set a per-call timeout only for the long commands (synth,
+record, record-ref, voice-check).
 
 The playbook in the agent is written for small models: exact commands, one
 tool call per step, read the JSON after each command, stop on exit code 2 or 3,
@@ -450,11 +459,17 @@ command), never under `opencode run`.
 
 - **Voice.** `python -m demo_smoke devices` lists microphones (and the screens
   `--capture screen` can grab). `python -m demo_smoke record-ref --out voices/nick.wav [--device N] [--seconds 60]`
-  prints a 150-word reading passage, counts down 3-2-1, records mono 48 kHz, trims
+  prints a ~150-word reading passage, counts down 3-2-1, records mono 48 kHz, trims
   silence, normalises to -3 dBFS and writes `voices/nick.wav` plus `voices/nick.json`
   (duration, speech seconds, SNR, clipping, warnings; exit 4 when a warning fires, the
   file is still saved). It records through `sounddevice` (`pip install sounddevice`;
-  Linux also needs `libportaudio2`) and falls back to ffmpeg's OS audio grabber.
+  Linux also needs `libportaudio2`) and falls back to ffmpeg's OS audio grabber. Linux
+  fallback: the pip ffmpeg (`imageio-ffmpeg`) has no PulseAudio input, so it records
+  through ALSA `default`, which needs `pipewire-alsa` (PipeWire) or
+  `alsa-plugins-pulseaudio` (PulseAudio); install the distro ffmpeg for `pulse` support.
+  `--backend ffmpeg --device N|NAME` hands the device to ffmpeg as is (on macOS `N` is the
+  avfoundation audio index); under `--backend auto` a numeric `--device` is a sounddevice
+  index and the ffmpeg fallback records from the OS default input.
   `/clone-voice nick` runs devices, asks for the microphone and name, records, runs
   `voice-check` and gives a GOOD / RE-RECORD verdict.
 - **Credentials.** `python -m demo_smoke creds set DEMO_PASS` prompts without echo and
@@ -464,10 +479,18 @@ command), never under `opencode run`.
   1Password reference such as `op://vault/item/field`, resolved at run time through the
   `op` CLI). `creds list` prints names only; `creds check DEMO_USER DEMO_PASS` says
   whether each resolves (environment, `.env` or `op://`; exit 4 lists the missing names).
-  Every kit command loads `.env` at start, and a variable already in the environment
-  wins. The agent may run `creds list` / `creds check`, but `creds set` is denied for it
-  (it needs your terminal), and `.env` is denied to its read tool and to `cat`, `type`,
-  `printenv`, `env`, `set` and `export`. That deny list is not a sandbox: under `--auto`
+  Every kit command loads the plain values of `.env` at start (a variable already in the
+  environment wins); an `op://` reference is resolved only by a login that needs it, in the
+  kit process, so `doctor`, `synth` or `record` never unlock the vault and Chrome does not
+  inherit the secret (the scenario's credential names are stripped from its environment).
+  Credentials are only ever typed into a loopback host (`localhost`, `127.0.0.1`, `::1`): a
+  scenario pointing at any other host fails its login unless you export
+  `DEMO_SMOKE_ALLOW_REMOTE_LOGIN=1` in your own shell. The agent may run `creds list` /
+  `creds check`, but `creds set` is denied for it (it needs your terminal), `.env` is denied
+  to its read tool and to `cat`, `type`, `printenv`, `env`, `set`, `export` and `declare`
+  (their argument forms too), `.ignore` keeps `.env` out of its grep/glob tools even when
+  the kit is not a git checkout, and `--env-file` and the remote-login override are denied
+  strings. That deny list is not a sandbox: under `--auto`
   any other bash command is approved, so keep secrets out of the shell that starts
   `opencode` if you do not trust the model. `/onboard` prints the exact `creds set`
   lines for you to run.
@@ -522,13 +545,13 @@ which step and which expectation failed, with console errors.
   logs/scenario.json                the loaded scenario (used by edit/verify/narrate-validate without SCENARIO)
   logs/step-NN-<id>.png             screenshot after each dryrun step; logs/record-NN-<id>.png during record
   logs/<name>.png                   extra `screenshot` actions
-  logs/failure-<id>.html            page DOM at the failing step
+  logs/failure-<id>.html            page DOM at the failing step (password inputs emptied)
   logs/smoke-results.md             human smoke report (failures, console errors)
   logs/dryrun.json, markers.json, edit.json (exact ffmpeg command), edit-filter.txt, verify.json
   logs/chrome.log, ffmpeg-capture.log / screen-capture.log
   audio/narration.json, seg-*.wav, durations.json, synth-stats.json, voice_check.wav
   raw/capture.mp4                   unedited capture; raw/frames/ + frames.json + frames.txt (ffconcat list) for the screencast backend
-  chrome-profile/                   the fresh Chrome profile of the last launch (a few MB, safe to delete)
+  chrome-profile/                   Chrome's fresh profile while a command runs; removed on close (it holds the app session's cookies)
   clips/                            reserved, always empty
 ```
 
@@ -615,6 +638,8 @@ company's video host; the file needs no re-encoding.
   `opencode.json`, and the agent is denied web access, `prefetch` and `--online`.
   OpenCode does refresh its model catalog from `models.opencode.ai` on start unless
   `OPENCODE_DISABLE_MODELS_FETCH=1` is set (it is an environment flag, not a config
-  key; the README examples export it). The reference clip stays where you recorded
+  key; the README examples export it), and it downloads ripgrep from GitHub the first
+  time grep/glob/file search runs without an `rg` on PATH or in its cache (see "Online
+  preparation"). The reference clip stays where you recorded
   it (`voices/`, gitignored via `*.wav`); screenshots and recordings stay under
   `demo-output/` (gitignored).

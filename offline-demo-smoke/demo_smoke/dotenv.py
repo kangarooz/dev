@@ -8,9 +8,13 @@ Names must match ``[A-Z_][A-Z0-9_]*``; other lines are ignored.
 A value may be a 1Password reference (``op://vault/item/field``); it is
 resolved at run time with ``op read REF`` when the ``op`` CLI is on PATH.
 
-``load_env(env_file)`` is what ``cli.main`` calls at start-up: it exports every
-name from the file that is not already set in ``os.environ`` (the environment
-always wins) and resolves ``op://`` values while doing so.
+``load_env(env_file, resolve_refs=False)`` is what ``cli.main`` calls at start-up: it
+exports every plain value from the file that is not already set in ``os.environ``
+(the environment always wins) and *defers* ``op://`` values: they are kept in
+``load_env.deferred`` and resolved by ``credential(name)`` only when a login needs
+them, so `doctor`, `synth`, `record` and the other commands never unlock the vault,
+and Chrome / ffmpeg never inherit the secret through the environment.  With
+``resolve_refs=True`` the references are resolved and exported right away.
 """
 
 from __future__ import annotations
@@ -223,17 +227,22 @@ def resolve(name: str, env_file: str | Path | None = None) -> tuple[str | None, 
 def load_env(env_file: str | Path | None = None, resolve_refs: bool = True) -> dict[str, str]:
     """Export ``.env`` names that are not already in ``os.environ``; return what was set.
 
-    ``op://`` values are resolved through the 1Password CLI when it is on PATH;
-    when it is missing or fails the name is **not** exported (a raw ``op://...``
-    string in ``os.environ`` would be typed into a login form as the password)
-    and ``load_env.unresolved`` maps that name to the reason after the call.
+    A raw ``op://...`` string never reaches ``os.environ`` (it would be typed into a
+    login form as the password).  With ``resolve_refs=True`` such values are resolved
+    through the 1Password CLI now and exported; when that fails the name is skipped and
+    ``load_env.unresolved`` maps it to the reason.  With ``resolve_refs=False`` they are
+    recorded in ``load_env.deferred`` (name -> reference) for ``credential`` to resolve
+    on first use, so nothing is unlocked or exported for commands that never log in.
     """
     loaded: dict[str, str] = {}
     unresolved: dict[str, str] = {}
     for name, value in read(env_file).items():
         if name in os.environ:
             continue
-        if resolve_refs and is_op_ref(value):
+        if is_op_ref(value):
+            if not resolve_refs:
+                load_env.deferred.setdefault(name, value)  # type: ignore[attr-defined]
+                continue
             try:
                 value = resolve_op(value)
             except OpError as e:
@@ -246,3 +255,33 @@ def load_env(env_file: str | Path | None = None, resolve_refs: bool = True) -> d
 
 
 load_env.unresolved = {}  # type: ignore[attr-defined]
+load_env.deferred = {}    # type: ignore[attr-defined]
+_credential_cache: dict[str, str] = {}
+
+
+def forget_deferred() -> None:
+    """Drop the deferred references and the resolved values (``cli.main`` starts each command clean)."""
+    load_env.deferred.clear()  # type: ignore[attr-defined]
+    _credential_cache.clear()
+
+
+def credential(name: str) -> tuple[str | None, str | None]:
+    """The value a login should use for ``name``: ``(value, None)`` or ``(None, why)``.
+
+    ``os.environ`` first; else a reference that ``load_env`` deferred, resolved now
+    through ``op`` and cached in this process only (never exported, so child
+    processes such as Chrome do not inherit it).
+    """
+    if name in os.environ:
+        return os.environ[name], None
+    if name in _credential_cache:
+        return _credential_cache[name], None
+    ref = load_env.deferred.get(name)  # type: ignore[attr-defined]
+    if ref is None:
+        return None, f"environment variable {name} is not set"
+    try:
+        value = resolve_op(ref)
+    except OpError as e:
+        return None, f"{name} could not be resolved ({e}); run `python -m demo_smoke creds check {name}`"
+    _credential_cache[name] = value
+    return value, None

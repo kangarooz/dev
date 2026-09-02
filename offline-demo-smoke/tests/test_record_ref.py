@@ -61,6 +61,9 @@ def test_passage_is_about_150_words_in_three_chunks():
     assert min(sizes) >= 25        # no chunk is a stub
     assert max(sizes) - min(sizes) <= 12    # roughly equal thirds (was 69 / 33 / 45)
     assert "?" in text and "fourteenth" in text     # a question and spoken numbers, per the contract
+    assert "forty-five" in text and "a few technical words" in text
+    # no part opens with a stub sentence ("Good." belongs to the sentence before it)
+    assert all(len(c.split(".")[0].split()) > 2 for c in chunks)
 
 
 def test_script_only_prints_passage_and_exits_zero(capsys):
@@ -241,6 +244,9 @@ def test_record_ref_retries_at_the_device_native_rate(fake_sounddevice, tmp_path
     assert run(["record-ref", "--out", str(out), "--seconds", "30", "--device", "2", "--no-countdown"]) == 0
     assert [c["samplerate"] for c in fake_sounddevice.calls] == [SR, 44100]
     assert all(c["device"] == 2 for c in fake_sounddevice.calls)
+    # priming retried at the native rate too, so the permission prompt still lands before the reading
+    assert [p["samplerate"] for p in fake_sounddevice.primed] == [SR, 44100]
+    assert all(p["device"] == 2 for p in fake_sounddevice.primed)
     side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
     assert side["backend"] == "sounddevice" and side["native_sample_rate"] == 44100 and side["sample_rate"] == SR
     assert sf.info(str(out)).samplerate == SR
@@ -352,8 +358,13 @@ def test_record_ref_falls_back_to_ffmpeg(no_sounddevice, tmp_path, monkeypatch, 
     assert printed.index("falling back to ffmpeg") < printed.index("part 1/3") < printed.index("3...")
     assert printed.index("3...") < printed.index("speak now")
     assert "pip install sounddevice" in printed          # ImportError -> the package is missing
+    # the input is opened once before the passage (pulse fails, alsa opens), and the format that
+    # opened records the take, so the reading does not start with a failing attempt
     fmts = [a[a.index("-f") + 1] for a in runner.seen]
-    assert fmts == ["pulse", "alsa"]
+    assert fmts == ["pulse", "alsa", "alsa"]
+    assert printed.index("backend: ffmpeg (alsa input opened)") < printed.index("part 1/3")
+    assert float(runner.seen[0][runner.seen[0].index("-t") + 1]) == oa.PRIME_SECONDS
+    assert not Path(runner.seen[0][-1]).exists()             # the warm-up capture is removed
     assert runner.seen[-1][-1] == str(out.with_name("ff.raw.wav"))
     assert not out.with_name("ff.raw.wav").exists()          # temp capture removed
     side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
@@ -367,13 +378,57 @@ def test_record_ref_ffmpeg_backend_explicit_resamples(fake_sounddevice, tmp_path
     runner = _fake_ffmpeg_writer(sr=44100)     # ffmpeg ignored -ar: still lands at 48 kHz
     monkeypatch.setattr(oa, "_run_record", runner)
     monkeypatch.setattr(oa, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(oa.platform, "system", lambda: "Linux")
     out = tmp_path / "ff.wav"
     code = run(["record-ref", "--out", str(out), "--seconds", "30", "--backend", "ffmpeg",
                 "--no-countdown", "--device", "hw:1"])
     assert code == 0
-    assert fake_sounddevice.calls == []        # sounddevice never touched
+    assert fake_sounddevice.calls == [] and fake_sounddevice.primed == []       # sounddevice never touched
     assert runner.seen[-1][runner.seen[-1].index("-i") + 1] == "hw:1"
     assert sf.info(str(out)).samplerate == SR
+    side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert side["backend"] == "ffmpeg (alsa:hw:1)" and side["sample_rate"] == SR
+    assert side["native_sample_rate"] == 44100              # the rate ffmpeg really wrote, not the target
+
+
+def test_backend_ffmpeg_forwards_a_numeric_device(fake_sounddevice, tmp_path, monkeypatch, capsys):
+    """`--backend ffmpeg --device 1` is the avfoundation audio index ffmpeg -list_devices prints."""
+    runner = _fake_ffmpeg_writer()
+    monkeypatch.setattr(oa, "_run_record", runner)
+    monkeypatch.setattr(oa, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(oa.platform, "system", lambda: "Darwin")
+    out = tmp_path / "mac.wav"
+    assert run(["record-ref", "--out", str(out), "--seconds", "30", "--backend", "ffmpeg",
+                "--no-countdown", "--device", "1"]) == 0
+    assert fake_sounddevice.calls == []
+    assert [a[a.index("-i") + 1] for a in runner.seen] == [":1", ":1"]        # warm-up, then the take
+    printed = capsys.readouterr().out
+    assert "is a sounddevice index" not in printed
+    side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert side["backend"] == "ffmpeg (avfoundation:1)" and side["device"] == "1"
+
+
+def test_ffmpeg_retry_counts_down_again(fake_sounddevice, tmp_path, monkeypatch, capsys):
+    """After a mid-take sounddevice failure the user is told to start over: give them the 3-2-1 again."""
+    fake_sounddevice.config["fail"] = True
+    monkeypatch.setattr(oa, "_run_record", _fake_ffmpeg_writer())
+    monkeypatch.setattr(oa, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(oa.platform, "system", lambda: "Linux")
+    assert run(["record-ref", "--out", str(tmp_path / "v.wav"), "--seconds", "30"]) == 0
+    printed = capsys.readouterr().out
+    assert printed.count("3...") == 2 and printed.count("speak now") == 2
+    assert printed.index("start reading again") < printed.rindex("3...") < printed.rindex("speak now")
+
+
+def test_resample_lowpasses_before_downsampling():
+    n = np.arange(96000 * 2)
+    alias = oa._resample(np.sin(2 * np.pi * 30000 * n / 96000), 96000, 48000)    # above the new Nyquist
+    assert len(alias) == 48000 * 2
+    assert float(np.sqrt(np.mean(alias[2000:-2000] ** 2))) < 0.01                 # gone, not folded to 18 kHz
+    tone = oa._resample(np.sin(2 * np.pi * 1000 * n / 96000), 96000, 48000)
+    assert float(np.sqrt(np.mean(tone[2000:-2000] ** 2))) == pytest.approx(0.707, abs=0.01)
+    up = oa._resample(np.sin(2 * np.pi * 1000 * np.arange(44100) / 44100), 44100, 48000)
+    assert len(up) == 48000 and float(np.sqrt(np.mean(up ** 2))) == pytest.approx(0.707, abs=0.01)
 
 
 def test_numeric_device_is_not_forwarded_to_ffmpeg(fake_sounddevice, tmp_path, monkeypatch, capsys):
@@ -387,7 +442,7 @@ def test_numeric_device_is_not_forwarded_to_ffmpeg(fake_sounddevice, tmp_path, m
     out = tmp_path / "v.wav"
     assert run(["record-ref", "--out", str(out), "--seconds", "30", "--device", "2", "--no-countdown"]) == 0
     printed = capsys.readouterr().out
-    assert [a[a.index("-i") + 1] for a in runner.seen] == ["default", "default"]
+    assert [a[a.index("-i") + 1] for a in runner.seen] == ["default"] * 3     # warm-up x2 (pulse, alsa), take
     assert "sounddevice failed" in printed and "start reading again" in printed
     assert "is a sounddevice index" in printed and "OS default input" in printed
     side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))

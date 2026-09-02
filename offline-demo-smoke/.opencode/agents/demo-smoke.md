@@ -16,14 +16,6 @@ permission:
     "python3 -m demo_smoke *": allow
     ".venv/bin/python -m demo_smoke *": allow
     '.venv\Scripts\python.exe -m demo_smoke *': allow
-    "python -m demo_smoke record-ref *": allow
-    "python -m demo_smoke devices *": allow
-    "python -m demo_smoke creds list *": allow
-    "python -m demo_smoke creds check *": allow
-    "python -m demo_smoke init-scenario *": allow
-    "python -m demo_smoke validate *": allow
-    "python -m demo_smoke inspect *": allow
-    "python -m demo_smoke check-model *": allow
     "cat *": allow
     "ls": allow
     "ls *": allow
@@ -50,6 +42,13 @@ permission:
     "rm -rf *": deny
     "del *": deny
     "git push*": deny
+    "env *": deny
+    "export *": deny
+    "set *": deny
+    "declare*": deny
+    "*/.env*": deny
+    "* --env-file*": deny
+    "*DEMO_SMOKE_ALLOW_REMOTE_LOGIN*": deny
   read:
     "*": allow
     "*.env": deny
@@ -69,8 +68,9 @@ commands below, one tool call per step, read the result file, then decide the ne
 ## Ground rules
 - `<scenario>` = the scenario JSON path. `<out>` = the output directory; default `demo-output/<slug>` where slug is the `"slug"` field of the scenario. `<ref>` = the reference voice WAV, only if the user gave one.
 - Step 0, before step 1: run exactly `ls .venv/bin/python` (Windows: `dir .venv\Scripts\python.exe`). If it prints the path, the venv exists: use that path instead of `python` in every command below. If it prints `No such file` (or `File Not Found`), use `python`. Also switch to the venv path if any command prints `No module named ...`.
-- One command per step. Wait for it to finish. After every command that takes `--out <dir>` (doctor, dryrun, narrate-validate, narrate-template, synth, record, edit, verify; inspect, devices, voice-check and check-model in the onboarding commands) read `<out>/logs/<cmd>.json` with the read tool before you continue. `init-scenario`, `creds check` and `record-ref` write no `<out>/logs/` file: their result is the line they print (`record-ref` writes `voices/<name>.json`), and `validate` writes `logs/validate.json` only when `--out` is given; the command file says which file, if any, to read after them. On exit 3, and on exit 4 from any command except `narrate-validate`, the log contains only `error` and `exit_code`; `narrate-validate`'s exit-4 log also has `errors` (a list of problems) and `budget` (the word limit). Do not search for files; read the exact path.
-- Exit codes, with the output line that goes with them: 0 = ok. 2 = the FEATURE failed (the summary line says `FAIL`): stop and write the Report. 3 = a TOOL failed (a line starting with `error:`): stop and write the Report. 4 = bad input. In the Playbook only `narrate-validate` may be retried (step 4, its line starts with `narrate-validate: INVALID`); from any other Playbook command stop, quote its `error:` line in the Report, and do not edit the scenario. In `/onboard` and `/clone-voice` the command file says which exit-4 results to fix once (`init-scenario`, `creds check`, `validate`, `record-ref`): follow it, never retry more than once.
+- One command per step. Wait for it to finish. After every command that takes `--out <dir>` (doctor, dryrun, narrate-validate, narrate-template, synth, record, edit, verify; devices, voice-check and check-model in the onboarding commands) read `<out>/logs/<cmd>.json` with the read tool before you continue. `inspect` is the exception: use the table it prints and do not read `logs/inspect.json` (every inspect overwrites it). `init-scenario`, `creds check` and `record-ref` write no `<out>/logs/` file: their result is the line they print (`record-ref` writes `voices/<name>.json`), and `validate` writes `logs/validate.json` only when `--out` is given; the command file says which file, if any, to read after them. On exit 3, and on exit 4 from any command except `narrate-validate`, the log contains only `error` and `exit_code`; `narrate-validate`'s exit-4 log also has `errors` (a list of problems) and `budget` (the word limit). Do not search for files; read the exact path.
+- Exit codes, with the output line that goes with them: 0 = ok. 2 = the FEATURE failed (the summary line says `FAIL`). 3 = a TOOL failed (a line starting with `error:`). 4 = bad input. In the Playbook: on 2 or 3 stop and write the Report; on 4 only `narrate-validate` may be retried (step 4, its line starts with `narrate-validate: INVALID`); from any other Playbook command stop, quote its `error:` line in the Report, and do not edit the scenario. In `/onboard` and `/clone-voice` the command file says which exit-4 results to fix once (`init-scenario`, `creds check`, `validate`, `record-ref`, `dryrun`): follow it, never retry more than once.
+- When you were started by a command file (`/onboard`, `/clone-voice`, `/voice-check`, `/setup`, `/narrate`), its exit-code branches and its final reply override these rules: a `FAIL` or `PROBLEM` there is handled as the command file says, and the smoke Report is not written.
 - If a command is cut off by the tool timeout (no `<cmd>:` summary line and no `error:` line came back), do not rerun it; stop and report `ERROR (stage: <cmd>, timed out)`.
 - The only file you may write is `<out>/audio/narration.json`. Never edit a scenario file unless the user explicitly asked you to write or change a scenario (`/onboard` does). Never edit anything else. Never install packages. Never use the web (`prefetch` and `--online` are denied). Never run a command that is not in this file or in the command you were given.
 - Credentials (`DEMO_USER`, `DEMO_PASS`, ...) come from the environment the user started OpenCode in, or from the kit's `.env`, which you never read. Never put them on the command line and never ask for their values.
@@ -83,8 +83,8 @@ commands below, one tool call per step, read the result file, then decide the ne
 2. `python -m demo_smoke dryrun <scenario> --out <out>` - exit 2: read `<out>/logs/smoke-results.md`, then go to Report.
 3. Write `<out>/audio/narration.json` (see Narration) with the write tool, the whole file at once (never bash, never a heredoc, never the edit tool). Base it on the scenario's `intro`, `outro`, step `title` and `narration` fields.
 4. `python -m demo_smoke narrate-validate <scenario> --out <out>` - exit 4 (`narrate-validate: INVALID ...`): rewrite the whole narration.json once with the write tool, fixing exactly the listed errors, then run narrate-validate once more. Still invalid: run `python -m demo_smoke narrate-template <scenario> --out <out>` and continue.
-5. `python -m demo_smoke synth --out <out> --tts auto --ref <ref>` - omit `--ref <ref>` when there is no reference clip. Use `--tts tone` instead of `--tts auto` when step 1 said so, or when the user asked for a silent or test run.
-6. `python -m demo_smoke record <scenario> --out <out> --capture screencast` (use `--capture screen` only if the user asked for it).
+5. `python -m demo_smoke synth --out <out> --tts auto --ref <ref>` (bash tool `timeout` 1200000 ms: a CPU synth is slow) - omit `--ref <ref>` when there is no reference clip. Use `--tts tone` instead of `--tts auto` when step 1 said so, or when the user asked for a silent or test run.
+6. `python -m demo_smoke record <scenario> --out <out> --capture screencast` (bash tool `timeout` 600000 ms; use `--capture screen` only if the user asked for it).
 7. `python -m demo_smoke edit --out <out>`
 8. `python -m demo_smoke verify --out <out>` - exit 2 means a check failed; still write the Report.
 9. Write the Report.
@@ -103,7 +103,7 @@ File `<out>/audio/narration.json`, exactly this shape and nothing else:
 - The total word count of all segments must stay below `max_length_seconds x 2.6` (the scenario field).
 - intro says what the feature is, spoken over the first screen. outro is one closing sentence.
 
-## Report (always your last message)
+## Report (last message of the Playbook and of `run`)
 ```
 Demo smoke report: <scenario name>
 Verdict: PASS | FAIL | ERROR   (stage: <last command that ran>)

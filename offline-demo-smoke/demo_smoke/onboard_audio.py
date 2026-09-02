@@ -1,12 +1,14 @@
 """Onboarding audio: ``record-ref`` (record a reference voice) and ``devices``.
 
-``record-ref`` prints the reading passage (``passage.txt``) in three chunks,
-counts down 3-2-1, records mono 48 kHz for ``--seconds`` with sounddevice
-(PortAudio) or, as a fallback, ffmpeg's OS audio grabber (dshow / avfoundation /
-pulse / alsa), then peak-normalises to -3 dBFS, trims leading and trailing
-silence at -40 dBFS (200 ms padding), writes a PCM16 WAV plus a ``<name>.json``
-sidecar with stats and warnings.  Exit 4 when a warning fires (the file is
-still saved), 3 when nothing could record, 130 on Ctrl-C.
+``record-ref`` resolves the recording backend first (sounddevice/PortAudio, or
+ffmpeg's OS audio grabber: dshow / avfoundation / pulse / alsa) and opens the
+input once so driver start-up and the macOS microphone prompt happen before
+anyone starts reading; then it prints the reading passage (``passage.txt``) in
+three chunks, counts down 3-2-1, records mono 48 kHz for ``--seconds``, peak-
+normalises to -3 dBFS, trims leading and trailing silence at -40 dBFS (200 ms
+padding), writes a PCM16 WAV plus a ``<name>.json`` sidecar with stats and
+warnings.  Exit 4 when a warning fires (the file is still saved), 3 when nothing
+could record, 130 on Ctrl-C.
 
 ``devices`` lists sounddevice input devices and the screens ``--capture screen``
 can grab; every probe degrades to an "unavailable" note instead of raising.
@@ -56,6 +58,9 @@ NOISE_PERCENTILE = 10
 SPEECH_ABOVE_FLOOR_DB = 6.0
 DB_FLOOR = -120.0
 
+SILENT_PEAK_DB = -60.0     # raw peak below this: no signal reached the ADC at all
+
+WARN_SILENT = "silent (no signal)"
 WARN_SHORT = "too short (<20 s of speech)"
 WARN_NOISY = "noisy (SNR < 15 dB)"
 WARN_CLIPPED = "clipped"
@@ -106,14 +111,19 @@ def _find_ffmpeg() -> str | None:
 
 
 def _run_capture(argv: list[str], timeout: float = 20) -> str:
-    """Run a listing command and return stdout+stderr (ffmpeg lists devices on stderr)."""
-    cp = subprocess.run(argv, capture_output=True, text=True, errors="replace",
+    """Run a listing command and return stdout+stderr (ffmpeg lists devices on stderr).
+
+    ffmpeg prints device names as UTF-8 on every OS (dshow converts the wide names
+    itself), so decode them as UTF-8 rather than with the console code page: with
+    cp1252 an Intel ``Microphone Array (Intel® ...)`` becomes ``IntelÂ®`` and the
+    name can no longer be opened."""
+    cp = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
                         timeout=timeout, check=False)
     return (cp.stderr or "") + "\n" + (cp.stdout or "")
 
 
 def _run_record(argv: list[str], timeout: float) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, capture_output=True, text=True, errors="replace",
+    return subprocess.run(argv, capture_output=True, text=True, encoding="utf-8", errors="replace",
                           timeout=timeout, check=False)
 
 
@@ -134,10 +144,15 @@ def passage_chunks(text: str | None = None, n: int = 3) -> list[str]:
     chunks: list[list[str]] = [[] for _ in range(max(1, n))]
     i, count = 0, 0
     for s in sentences:
-        if i < n - 1 and count >= total * (i + 1) / n:
-            i += 1
+        words = len(s.split())
+        # start the next part when adding this sentence would overshoot the boundary
+        # by more than stopping here undershoots it (never leave a part empty)
+        if i < n - 1 and chunks[i]:
+            target = total * (i + 1) / n
+            if abs(count + words - target) > abs(count - target):
+                i += 1
         chunks[i].append(s)
-        count += len(s.split())
+        count += words
     return [" ".join(c) for c in chunks if c]
 
 
@@ -257,6 +272,8 @@ def analyze(a: np.ndarray, sr: int, clipped_percent: float = 0.0) -> dict:
 
 def warnings_for(stats: dict) -> list[str]:
     w = []
+    if stats.get("raw_peak_dbfs", 0.0) < SILENT_PEAK_DB:
+        w.append(WARN_SILENT)
     if stats.get("speech_seconds", 0.0) < MIN_SPEECH_S:
         w.append(WARN_SHORT)
     if stats.get("snr_db", 0.0) < MIN_SNR_DB:
@@ -275,10 +292,11 @@ def process(raw, sr: int) -> tuple[np.ndarray, dict]:
     mono = to_mono(raw)
     clip = clipped_pct(mono)
     raw_duration = round(mono.size / float(sr), 3) if sr else 0.0
+    raw_peak_db = _db(float(np.max(np.abs(mono)))) if mono.size else DB_FLOOR
     normed, gain_db = normalize_peak(mono)
     trimmed, start, end = trim_silence(normed, sr)
     stats = analyze(trimmed, sr, clip)
-    stats.update({"raw_duration": raw_duration, "gain_db": gain_db,
+    stats.update({"raw_duration": raw_duration, "gain_db": gain_db, "raw_peak_dbfs": _round(raw_peak_db),
                   "trim": {"start_s": round(start / sr, 3), "end_s": round(end / sr, 3)}})
     stats["warnings"] = warnings_for(stats)
     return trimmed, stats
@@ -297,11 +315,45 @@ def write_wav16(path: Path, a: np.ndarray, sr: int) -> Path:
 # --------------------------------------------------------------------------- device listing
 
 
+SD_NOTE_PIP = "pip install sounddevice (it is in requirements.txt: re-run scripts/setup)"
+SD_NOTE_PORTAUDIO = ("PortAudio library missing: apt install libportaudio2 (Debian/Ubuntu), "
+                     "dnf install portaudio (Fedora) or brew install portaudio (macOS)")
+
+
+def _import_sounddevice_detail() -> tuple:
+    """``(module, None)`` or ``(None, note)`` where the note names the actual fix:
+    ``ImportError`` = the package is absent, ``OSError`` = PortAudio's shared library is."""
+    try:
+        return importlib.import_module("sounddevice"), None
+    except ImportError as e:
+        return None, f"sounddevice not installed ({_one_line(e)}): {SD_NOTE_PIP}"
+    except OSError as e:
+        return None, f"sounddevice found but {SD_NOTE_PORTAUDIO} ({_one_line(e)})"
+    except Exception as e:  # noqa: BLE001 - anything else PortAudio init can throw
+        return None, f"sounddevice import failed ({_one_line(e)})"
+
+
 def _import_sounddevice():
     """The sounddevice module or ``None`` (missing package or missing PortAudio library)."""
+    return _import_sounddevice_detail()[0]
+
+
+def _hostapi_names(sd) -> list[str]:
     try:
-        return importlib.import_module("sounddevice")
-    except Exception:  # noqa: BLE001 - ImportError, or OSError when libportaudio is absent
+        return [str(a.get("name", "")) for a in sd.query_hostapis()]
+    except Exception:  # noqa: BLE001 - optional decoration only
+        return []
+
+
+def _device_default_rate(sd, device: int | None) -> int | None:
+    """The device's (or the default input's) ``default_samplerate``, or None."""
+    try:
+        idx = device if device is not None else _default_input_index(sd)
+        if idx is None:
+            return None
+        rate = int(float(sd.query_devices(idx)["default_samplerate"]))
+        return rate if rate > 0 else None
+    except Exception:  # noqa: BLE001
         return None
 
 
@@ -317,22 +369,28 @@ def _default_input_index(sd) -> int | None:
 
 def list_input_devices() -> dict:
     """{"available": bool, "devices": [{"index","name","channels","default","samplerate"}], "note"}"""
-    sd = _import_sounddevice()
+    sd, note = _import_sounddevice_detail()
     if sd is None:
-        return {"available": False, "devices": [],
-                "note": "sounddevice not installed or PortAudio missing "
-                        "(pip install sounddevice; Linux: apt install libportaudio2); "
-                        "record-ref falls back to ffmpeg"}
+        return {"available": False, "devices": [], "note": f"{note}; record-ref falls back to ffmpeg"}
     try:
         raw = sd.query_devices()
         default = _default_input_index(sd)
+        apis = _hostapi_names(sd)
         devices = []
         for i, d in enumerate(raw):
             info = dict(d) if isinstance(d, dict) else {"name": str(d)}
             ch = int(info.get("max_input_channels", 0) or 0)
             if ch <= 0:
                 continue
-            devices.append({"index": i, "name": str(info.get("name", f"device {i}")), "channels": ch,
+            name = str(info.get("name", f"device {i}"))
+            # Windows lists every microphone once per host API (MME names cut at 31 chars,
+            # DirectSound, WASAPI, WDM-KS): label them so the entries can be told apart.
+            if len(apis) > 1:
+                try:
+                    name += f" [{apis[int(info.get('hostapi'))]}]"
+                except (TypeError, ValueError, IndexError):
+                    pass
+            devices.append({"index": i, "name": name, "channels": ch,
                             "default": i == default,
                             "samplerate": info.get("default_samplerate")})
         note = None if devices else "no input devices found (is a microphone connected?)"
@@ -463,21 +521,59 @@ def _print_devices(audio: dict, screens: dict) -> None:
 # --------------------------------------------------------------------------- recording backends
 
 
-def record_sounddevice(seconds: float, device: int | None = None, sr: int = SAMPLE_RATE) -> np.ndarray:
-    """Blocking mono float32 capture through PortAudio; raises RecordError on any failure."""
-    sd = _import_sounddevice()
-    if sd is None:
-        raise RecordError("sounddevice not importable (pip install sounddevice; Linux needs libportaudio2)")
-    frames = round(seconds * sr)
-    try:
-        kw = {"samplerate": sr, "channels": 1, "dtype": "float32"}
-        if device is not None:
-            kw["device"] = device
-        buf = sd.rec(frames, **kw)
-        sd.wait()
-    except Exception as e:  # noqa: BLE001 - PortAudioError and friends -> ffmpeg fallback
-        raise RecordError(f"sounddevice: {_one_line(e)}") from None
+def _sd_rec(sd, seconds: float, device: int | None, sr: int) -> np.ndarray:
+    kw = {"samplerate": sr, "channels": 1, "dtype": "float32"}
+    if device is not None:
+        kw["device"] = device
+    buf = sd.rec(round(seconds * sr), **kw)
+    sd.wait()
     return np.asarray(buf)
+
+
+def prime_input(sd, device: int | None = None, sr: int = SAMPLE_RATE) -> bool:
+    """Open and close the input once, before the passage and the countdown.
+
+    The first stream a terminal opens triggers the macOS microphone permission
+    dialog (and driver start-up everywhere); doing it here means it does not
+    happen while the user is already reading.  Never raises."""
+    stream_cls = getattr(sd, "InputStream", None)
+    if stream_cls is None:
+        return False
+    kw = {"samplerate": sr, "channels": 1, "dtype": "float32"}
+    if device is not None:
+        kw["device"] = device
+    try:
+        with stream_cls(**kw):
+            pass
+        return True
+    except Exception:  # noqa: BLE001 - the real attempt below reports the error
+        return False
+
+
+def record_sounddevice(seconds: float, device: int | None = None, sr: int = SAMPLE_RATE,
+                       sd=None) -> tuple[np.ndarray, int]:
+    """Blocking mono float32 capture through PortAudio; returns ``(audio, native_rate)``.
+
+    Opens the input at ``sr``; when the device refuses that rate (CoreAudio does
+    not resample for PortAudio, so a 44.1 kHz-only USB microphone fails) it is
+    retried once at the device's ``default_samplerate`` and the result is
+    resampled to ``sr``.  Raises RecordError on any failure."""
+    if sd is None:
+        sd, note = _import_sounddevice_detail()
+        if sd is None:
+            raise RecordError(f"sounddevice not importable: {note}")
+    try:
+        return _sd_rec(sd, seconds, device, sr), sr
+    except Exception as e:  # noqa: BLE001 - PortAudioError and friends
+        first = _one_line(e)
+    native = _device_default_rate(sd, device)
+    if not native or native == sr:
+        raise RecordError(f"sounddevice: {first}")
+    try:
+        buf = _sd_rec(sd, seconds, device, native)
+    except Exception as e:  # noqa: BLE001
+        raise RecordError(f"sounddevice: {first}; at {native} Hz: {_one_line(e)}") from None
+    return _resample(to_mono(buf), native, sr).reshape(-1, 1), native
 
 
 def ffmpeg_record_args(ffmpeg: str, fmt: str, device: str | None, seconds: float, out_path: Path,
@@ -485,14 +581,15 @@ def ffmpeg_record_args(ffmpeg: str, fmt: str, device: str | None, seconds: float
     """ffmpeg argv recording ``seconds`` of mono PCM16 from an OS audio input (pure).
 
     ``fmt``: dshow (device = DirectShow audio device name), avfoundation (device =
-    audio device index, default 0 -> ``-i :0``), pulse / alsa (device default ``default``)."""
+    audio device index or name; default ``-i :default`` = the system default input,
+    not the first enumerated device), pulse / alsa (device default ``default``)."""
     head = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y"]
     if fmt == "dshow":
         if not device:
             raise ValueError("dshow needs an audio device name")
         inp = ["-f", "dshow", "-i", f"audio={device}"]
     elif fmt == "avfoundation":
-        inp = ["-f", "avfoundation", "-i", f":{device if device not in (None, '') else '0'}"]
+        inp = ["-f", "avfoundation", "-i", f":{device if device not in (None, '') else 'default'}"]
     elif fmt in ("pulse", "alsa"):
         inp = ["-f", fmt, "-i", device or "default"]
     else:
@@ -513,24 +610,44 @@ def ffmpeg_candidates(os_name: str, device: str | None = None, ffmpeg: str | Non
     return [("pulse", device), ("alsa", device)]
 
 
+def ffmpeg_error_summary(stderr: str, returncode: int) -> str:
+    """One informative line from ffmpeg's stderr: the generic ``Error opening input
+    file(s)`` trailer hides lines such as ``Unknown input format: 'pulse'``."""
+    lines = [ln.strip() for ln in (stderr or "").splitlines() if ln.strip()]
+    informative = [ln for ln in lines if "Error opening input" not in ln]
+    if informative:
+        return informative[-1][:160]
+    return (lines[-1][:160] if lines else f"exit {returncode}")
+
+
 def record_ffmpeg(seconds: float, out_path: Path, device: str | None = None, os_name: str | None = None,
-                  ffmpeg: str | None = None, sr: int = SAMPLE_RATE) -> tuple[np.ndarray, str]:
-    """Record via ffmpeg into ``<out>.raw.wav`` and load it; returns (audio, "<fmt>:<device>")."""
+                  ffmpeg: str | None = None, sr: int = SAMPLE_RATE,
+                  candidates: list | None = None) -> tuple[np.ndarray, str]:
+    """Record via ffmpeg into ``<out>.raw.wav`` and load it; returns (audio, "<fmt>:<device>").
+
+    ``candidates`` (from ``prepare_capture``) skips the device listing here."""
     import soundfile as sf
 
     os_name = os_name or platform.system()
     ffmpeg = ffmpeg or _find_ffmpeg()
     if not ffmpeg:
         raise RecordError("ffmpeg not found (set DEMO_SMOKE_FFMPEG or pip install imageio-ffmpeg)")
+    if candidates is None:
+        candidates = ffmpeg_candidates(os_name, device, ffmpeg)
     tmp = out_path.with_name(out_path.stem + ".raw.wav")
     tmp.parent.mkdir(parents=True, exist_ok=True)
     tried = []
-    for fmt, dev in ffmpeg_candidates(os_name, device, ffmpeg):
+    for fmt, dev in candidates:
         argv = ffmpeg_record_args(ffmpeg, fmt, dev, seconds, tmp, sr)
         try:
             cp = _run_record(argv, timeout=seconds + 60)
+        except subprocess.TimeoutExpired as e:
+            tried.append(f"{fmt}: ffmpeg timed out after {float(e.timeout):g} s")
+            _unlink(tmp)   # a killed ffmpeg leaves a partial capture behind
+            continue
         except (OSError, subprocess.SubprocessError) as e:
             tried.append(f"{fmt}: {_one_line(e)}")
+            _unlink(tmp)
             continue
         if cp.returncode == 0 and tmp.is_file() and tmp.stat().st_size > 44:
             try:
@@ -543,8 +660,7 @@ def record_ffmpeg(seconds: float, out_path: Path, device: str | None = None, os_
             if got_sr != sr:
                 data = _resample(data[:, 0], got_sr, sr).reshape(-1, 1)
             return data, f"{fmt}:{dev or 'default'}"
-        tail = " ".join((cp.stderr or "").strip().splitlines()[-1:]) or f"exit {cp.returncode}"
-        tried.append(f"{fmt}: {tail[:160]}")
+        tried.append(f"{fmt}: {ffmpeg_error_summary(cp.stderr, cp.returncode)}")
         _unlink(tmp)
     if not tried:
         raise RecordError("ffmpeg: no dshow audio device listed (run `devices`, or pass --device NAME)")
@@ -568,30 +684,80 @@ def _resample(x: np.ndarray, sr_in: int, sr_out: int) -> np.ndarray:
     return np.interp(dst, src, x).astype(np.float32)
 
 
-def capture(seconds: float, backend: str, device: str | None, out_path: Path,
-            os_name: str | None = None) -> tuple[np.ndarray, str]:
-    """Record with the requested backend (``auto`` = sounddevice, then ffmpeg); returns (audio, backend used)."""
-    errors = []
+def prepare_capture(backend: str, device: str | None, os_name: str | None = None) -> dict:
+    """Resolve the backend *before* the passage and the countdown; returns a plan for ``run_capture``.
+
+    ``auto`` = sounddevice when it imports (the input is primed once so the macOS
+    microphone prompt and driver start-up do not eat the first seconds of the
+    reading), else ffmpeg.  The ffmpeg device list (a ``-list_devices`` run on
+    Windows) is resolved here too.  Raises RecordError when nothing can record."""
+    os_name = os_name or platform.system()
     sd_device: int | None = None
     if device is not None and re.fullmatch(r"-?\d+", str(device).strip()):
         sd_device = int(str(device).strip())
+    plan: dict = {"requested": backend, "backend": None, "sd": None, "sd_device": sd_device, "device": device,
+                  "os_name": os_name, "ffmpeg": None, "candidates": None, "ffmpeg_device": None, "errors": []}
     if backend in ("auto", "sounddevice"):
         if device is None or sd_device is not None:
-            try:
-                return record_sounddevice(seconds, sd_device), "sounddevice"
-            except RecordError as e:
-                errors.append(str(e))
-                if backend == "sounddevice":
-                    raise RecordError("; ".join(errors)) from None
-                _say(f"  sounddevice unavailable ({e}); falling back to ffmpeg")
+            sd, note = _import_sounddevice_detail()
+            if sd is not None:
+                plan["backend"], plan["sd"] = "sounddevice", sd
+                opened = prime_input(sd, sd_device)
+                _say("  backend: sounddevice" + (f" device {sd_device}" if sd_device is not None else "")
+                     + (" (input opened)" if opened else ""))
+                return plan
+            msg = f"sounddevice not importable: {note}"
+            plan["errors"].append(msg)
+            if backend == "sounddevice":
+                raise RecordError(msg)
+            _say(f"  sounddevice unavailable ({msg}); falling back to ffmpeg")
         elif backend == "sounddevice":
             raise RecordError(f"--device must be a sounddevice index for --backend sounddevice, got {device!r}")
+    _prepare_ffmpeg(plan)
+    return plan
+
+
+def _prepare_ffmpeg(plan: dict) -> None:
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        raise RecordError("; ".join(plan["errors"]
+                                    + ["ffmpeg not found (set DEMO_SMOKE_FFMPEG or pip install imageio-ffmpeg)"]))
+    # A numeric --device is a sounddevice (PortAudio) index; ffmpeg's dshow / avfoundation /
+    # pulse namespaces would read the same number as something else, so ffmpeg records from
+    # the OS default input instead.
+    dev = None if plan["sd_device"] is not None else plan["device"]
+    candidates = ffmpeg_candidates(plan["os_name"], dev, ffmpeg)
+    if not candidates:
+        raise RecordError("; ".join(plan["errors"]
+                                    + ["ffmpeg: no dshow audio device listed (run `devices`, or pass --device NAME)"]))
+    plan.update({"backend": "ffmpeg", "ffmpeg": ffmpeg, "candidates": candidates, "ffmpeg_device": dev})
+    if dev is None and plan["device"] is not None:
+        _say(f"  --device {plan['device']} is a sounddevice index, not an ffmpeg device: "
+             "ffmpeg records from the OS default input")
+    elif dev is None and candidates[0][0] == "dshow":
+        _say(f"  ffmpeg: recording from dshow device {candidates[0][1]!r}")
+
+
+def run_capture(plan: dict, seconds: float, out_path: Path) -> tuple[np.ndarray, str, int]:
+    """Record according to ``plan``; returns (audio, backend used, native sample rate)."""
+    if plan["backend"] == "sounddevice":
+        try:
+            data, native = record_sounddevice(seconds, plan["sd_device"], sd=plan["sd"])
+            return data, "sounddevice", native
+        except RecordError as e:
+            plan["errors"].append(str(e))
+            if plan["requested"] == "sounddevice":
+                raise RecordError("; ".join(plan["errors"])) from None
+            _say(f"  sounddevice failed ({e}); falling back to ffmpeg")
+            _prepare_ffmpeg(plan)
+            _say("  Recording with ffmpeg now: start reading again from part 1.")
     try:
-        data, used = record_ffmpeg(seconds, out_path, device, os_name)
-        return data, f"ffmpeg ({used})"
+        data, used = record_ffmpeg(seconds, out_path, plan["ffmpeg_device"], plan["os_name"], plan["ffmpeg"],
+                                   candidates=plan["candidates"])
+        return data, f"ffmpeg ({used})", SAMPLE_RATE
     except RecordError as e:
-        errors.append(str(e))
-    raise RecordError("; ".join(errors))
+        plan["errors"].append(str(e))
+    raise RecordError("; ".join(plan["errors"]))
 
 
 # --------------------------------------------------------------------------- commands
@@ -620,21 +786,22 @@ def record_ref(out: Path, seconds: float = DEFAULT_SECONDS, device: str | None =
                backend: str = "auto", show_countdown: bool = True, os_name: str | None = None) -> dict:
     """Full record-ref flow; returns the sidecar dict (with ``exit_code``).  Raises RecordError."""
     out = Path(out)
+    plan = prepare_capture(backend, device, os_name)   # imports, listings, mic permission: before the reading
     chunks = passage_chunks()
     print_passage(chunks)
     _say(f"Recording {seconds:g} s of mono {SAMPLE_RATE // 1000} kHz audio"
-         + (f" from device {device}" if device is not None else "") + ". Get ready.")
+         + (f" from device {device}" if device is not None else "") + f" with {plan['backend']}. Get ready.")
     countdown(show_countdown)
     _say("  Recording... speak now.")
     t0 = time.time()
-    raw, used = capture(seconds, backend, device, out, os_name)
+    raw, used, native = run_capture(plan, seconds, out)
     took = round(time.time() - t0, 1)
     _say(f"  done ({took} s, backend {used}); processing...")
     audio, stats = process(raw, SAMPLE_RATE)
     p = write_wav16(out, audio, SAMPLE_RATE)
     warnings = stats.pop("warnings")
     data = {"path": str(p), "sample_rate": SAMPLE_RATE, "channels": 1, "format": "PCM_16",
-            "backend": used, "device": device, "seconds_requested": float(seconds),
+            "backend": used, "device": device, "native_sample_rate": native, "seconds_requested": float(seconds),
             "seconds_recording": took, **stats, "warnings": warnings,
             "exit_code": EXIT_BAD_INPUT if warnings else EXIT_OK}
     data["json"] = str(_write_sidecar(out, data))
@@ -675,7 +842,13 @@ def cmd_record_ref(args) -> int:
         data = record_ref(out, seconds, getattr(args, "device", None), getattr(args, "backend", "auto") or "auto",
                           show_countdown=not getattr(args, "no_countdown", False))
         _say(_summary(data))
-        if data["warnings"]:
+        if WARN_SILENT in data["warnings"]:
+            _say("  no signal reached the microphone input: check that the input is not muted and that "
+                 "--device names the right microphone (`python -m demo_smoke devices`)")
+            if platform.system() == "Darwin":
+                _say("  macOS: System Settings > Privacy & Security > Microphone: allow your terminal "
+                     "(or OpenCode), then record again")
+        elif data["warnings"]:
             _say("  re-record in a quieter room / closer to the mic / at a lower gain, then run "
                  f"`python -m demo_smoke voice-check --ref {data['path']}`")
         return int(data["exit_code"])

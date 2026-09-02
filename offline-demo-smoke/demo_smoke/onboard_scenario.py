@@ -713,7 +713,7 @@ def register(subparsers, run_map: dict) -> None:
 
     sp = subparsers.add_parser("validate", help="validate a scenario and list its steps")
     sp.add_argument("scenario", metavar="SCENARIO")
-    sp.add_argument("--out", default=None, help=f"where logs/validate.json goes (default: {DEFAULT_OUT})")
+    sp.add_argument("--out", default=None, help="write logs/validate.json under this directory (no log without it)")
     env_arg(sp)
     sp.set_defaults(fn=cmd_validate)
     run_map["validate"] = cmd_validate

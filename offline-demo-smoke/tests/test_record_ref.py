@@ -59,6 +59,7 @@ def test_passage_is_about_150_words_in_three_chunks():
     assert " ".join(chunks) == " ".join(text.split())
     sizes = [len(c.split()) for c in chunks]
     assert min(sizes) >= 25        # no chunk is a stub
+    assert max(sizes) - min(sizes) <= 12    # roughly equal thirds (was 69 / 33 / 45)
     assert "?" in text and "fourteenth" in text     # a question and spoken numbers, per the contract
 
 
@@ -151,6 +152,9 @@ def test_record_ref_happy_path(fake_sounddevice, tmp_path, capsys):
     # captured mono 48 kHz float32 for --seconds
     assert fake_sounddevice.calls == [{"frames": 40 * SR, "samplerate": SR, "channels": 1,
                                        "dtype": "float32", "device": None}]
+    # the input was opened once before the passage was printed (macOS permission prompt, driver start)
+    assert fake_sounddevice.primed == [{"samplerate": SR, "channels": 1, "dtype": "float32", "device": None}]
+    assert printed.index("backend: sounddevice (input opened)") < printed.index("part 1/3")
     data, sr = sf.read(str(out), dtype="float32", always_2d=True)
     info = sf.info(str(out))
     assert sr == SR and info.subtype == "PCM_16" and info.channels == 1
@@ -166,6 +170,7 @@ def test_record_ref_happy_path(fake_sounddevice, tmp_path, capsys):
     assert side["snr_db"] >= 25 and side["noise_floor_dbfs"] < -40
     assert side["speech_seconds"] >= 30 and side["clipped"] is False
     assert side["raw_duration"] == pytest.approx(40.0) and side["trim"]["start_s"] == pytest.approx(0.8, abs=0.05)
+    assert side["native_sample_rate"] == SR and side["raw_peak_dbfs"] == pytest.approx(-20.0, abs=0.5)
     for k in ("duration", "peak_dbfs", "rms_dbfs", "noise_floor_dbfs", "snr_db", "clipped_pct"):
         assert k in side
 
@@ -212,6 +217,36 @@ def test_record_ref_clipped_warns(fake_sounddevice, tmp_path):
     assert side["peak_dbfs"] == pytest.approx(-3.0, abs=0.1)     # still normalised on output
 
 
+def test_record_ref_silent_capture_warns_with_a_targeted_hint(fake_sounddevice, tmp_path, monkeypatch, capsys):
+    """Nothing reached the ADC (muted input, wrong device, denied mic permission): say so instead of
+    'find a quieter room'."""
+    fake_sounddevice.config["noise_db"] = -130.0
+    fake_sounddevice.config["speech_db"] = -100.0
+    monkeypatch.setattr(oa.platform, "system", lambda: "Darwin")
+    out = tmp_path / "quiet.wav"
+    assert run(["record-ref", "--out", str(out), "--seconds", "40", "--no-countdown"]) == 4
+    side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert side["warnings"][0] == oa.WARN_SILENT and side["raw_peak_dbfs"] < oa.SILENT_PEAK_DB
+    printed = capsys.readouterr().out
+    assert "no signal" in printed and "--device" in printed and "Privacy & Security > Microphone" in printed
+    assert "quieter room" not in printed
+    assert oa.warnings_for({"raw_peak_dbfs": -20.0, "speech_seconds": 30, "snr_db": 30}) == []
+
+
+def test_record_ref_retries_at_the_device_native_rate(fake_sounddevice, tmp_path):
+    """A 44.1 kHz-only microphone (CoreAudio does not resample for PortAudio): retry once at its
+    default_samplerate and resample, instead of dropping straight to ffmpeg."""
+    fake_sounddevice.config["rate_ok"] = 44100
+    out = tmp_path / "usb.wav"
+    assert run(["record-ref", "--out", str(out), "--seconds", "30", "--device", "2", "--no-countdown"]) == 0
+    assert [c["samplerate"] for c in fake_sounddevice.calls] == [SR, 44100]
+    assert all(c["device"] == 2 for c in fake_sounddevice.calls)
+    side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert side["backend"] == "sounddevice" and side["native_sample_rate"] == 44100 and side["sample_rate"] == SR
+    assert sf.info(str(out)).samplerate == SR
+    assert 27 <= side["duration"] <= 29
+
+
 def test_record_ref_list_devices(fake_sounddevice, capsys):
     assert run(["record-ref", "--list-devices"]) == 0
     out = capsys.readouterr().out
@@ -256,7 +291,7 @@ def test_ffmpeg_record_args_per_platform(tmp_path):
     assert win[6:10] == ["-f", "dshow", "-i", "audio=Microphone (Realtek)"]
     assert win[10:] == ["-t", "60", "-ac", "1", "-ar", "48000", "-c:a", "pcm_s16le", str(out)]
     mac = oa.ffmpeg_record_args("ffmpeg", "avfoundation", None, 30.5, out)
-    assert mac[6:10] == ["-f", "avfoundation", "-i", ":0"]
+    assert mac[6:10] == ["-f", "avfoundation", "-i", ":default"]      # the system default input, not device 0
     assert "-t" in mac and mac[mac.index("-t") + 1] == "30.5"
     mac2 = oa.ffmpeg_record_args("ffmpeg", "avfoundation", "1", 30, out)
     assert mac2[9] == ":1"
@@ -309,10 +344,14 @@ def test_record_ref_falls_back_to_ffmpeg(no_sounddevice, tmp_path, monkeypatch, 
     monkeypatch.setattr(oa, "_find_ffmpeg", lambda: "ffmpeg")
     monkeypatch.setattr(oa.platform, "system", lambda: "Linux")
     out = tmp_path / "voices" / "ff.wav"
-    code = run(["record-ref", "--out", str(out), "--seconds", "30", "--no-countdown"])
+    code = run(["record-ref", "--out", str(out), "--seconds", "30"])
     printed = capsys.readouterr().out
     assert code == 0, printed
     assert "falling back to ffmpeg" in printed
+    # the backend is settled before the passage and the countdown, not after "speak now"
+    assert printed.index("falling back to ffmpeg") < printed.index("part 1/3") < printed.index("3...")
+    assert printed.index("3...") < printed.index("speak now")
+    assert "pip install sounddevice" in printed          # ImportError -> the package is missing
     fmts = [a[a.index("-f") + 1] for a in runner.seen]
     assert fmts == ["pulse", "alsa"]
     assert runner.seen[-1][-1] == str(out.with_name("ff.raw.wav"))
@@ -335,6 +374,76 @@ def test_record_ref_ffmpeg_backend_explicit_resamples(fake_sounddevice, tmp_path
     assert fake_sounddevice.calls == []        # sounddevice never touched
     assert runner.seen[-1][runner.seen[-1].index("-i") + 1] == "hw:1"
     assert sf.info(str(out)).samplerate == SR
+
+
+def test_numeric_device_is_not_forwarded_to_ffmpeg(fake_sounddevice, tmp_path, monkeypatch, capsys):
+    """--device 2 is a PortAudio index; pulse would read it as a source index, avfoundation as its
+    own device 2 and dshow cannot open 'audio=2': the fallback records from the OS default."""
+    fake_sounddevice.config["fail"] = True
+    runner = _fake_ffmpeg_writer()
+    monkeypatch.setattr(oa, "_run_record", runner)
+    monkeypatch.setattr(oa, "_find_ffmpeg", lambda: "ffmpeg")
+    monkeypatch.setattr(oa.platform, "system", lambda: "Linux")
+    out = tmp_path / "v.wav"
+    assert run(["record-ref", "--out", str(out), "--seconds", "30", "--device", "2", "--no-countdown"]) == 0
+    printed = capsys.readouterr().out
+    assert [a[a.index("-i") + 1] for a in runner.seen] == ["default", "default"]
+    assert "sounddevice failed" in printed and "start reading again" in printed
+    assert "is a sounddevice index" in printed and "OS default input" in printed
+    side = json.loads(out.with_suffix(".json").read_text(encoding="utf-8"))
+    assert side["backend"] == "ffmpeg (alsa:default)" and side["device"] == "2"
+
+
+def test_portaudio_library_missing_is_named(monkeypatch):
+    real = oa.importlib.import_module
+
+    def missing_lib(name, *a, **k):
+        if name == "sounddevice":
+            raise OSError("PortAudio library not found")
+        return real(name, *a, **k)
+
+    monkeypatch.setattr(oa.importlib, "import_module", missing_lib)
+    mod, note = oa._import_sounddevice_detail()
+    assert mod is None and "libportaudio2" in note and "pip install" not in note
+    assert "libportaudio2" in oa.list_input_devices()["note"]
+    with pytest.raises(oa.RecordError, match="sounddevice not importable: .*libportaudio2"):
+        oa.record_sounddevice(1)
+
+
+def test_ffmpeg_error_summary_prefers_the_informative_line():
+    pulse = ("[in#0] Unknown input format: 'pulse'\nError opening input file default.\n"
+             "Error opening input files: Invalid argument\n")
+    assert oa.ffmpeg_error_summary(pulse, 234) == "[in#0] Unknown input format: 'pulse'"
+    assert oa.ffmpeg_error_summary("[alsa] cannot open audio device default (No such file)", 1) == \
+        "[alsa] cannot open audio device default (No such file)"
+    assert oa.ffmpeg_error_summary("Error opening input files: Invalid argument", 1) == \
+        "Error opening input files: Invalid argument"
+    assert oa.ffmpeg_error_summary("", 7) == "exit 7"
+
+
+def test_ffmpeg_output_is_decoded_as_utf8(monkeypatch):
+    seen = {}
+
+    def fake_run(argv, **kw):
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(oa.subprocess, "run", fake_run)
+    oa._run_capture(["ffmpeg"])
+    assert seen["encoding"] == "utf-8" and seen["errors"] == "replace"
+    oa._run_record(["ffmpeg"], timeout=5)
+    assert seen["encoding"] == "utf-8"
+
+
+def test_record_ffmpeg_removes_the_partial_capture_on_timeout(monkeypatch, tmp_path):
+    def timing_out(argv, timeout):
+        Path(argv[-1]).write_bytes(b"RIFF" + b"\0" * 100)     # ffmpeg had opened the file already
+        raise subprocess.TimeoutExpired(argv, timeout)
+
+    monkeypatch.setattr(oa, "_run_record", timing_out)
+    with pytest.raises(oa.RecordError, match="timed out"):
+        oa.record_ffmpeg(5, tmp_path / "v.wav", None, "Linux", "ffmpeg")
+    assert not (tmp_path / "v.raw.wav").exists()
 
 
 def test_record_ref_no_backend_is_exit_3(no_sounddevice, tmp_path, monkeypatch, capsys):

@@ -111,6 +111,13 @@
       "type *": "allow",
       "git status*": "allow",
       "git diff*": "allow",
+      "cat *.env*": "deny",
+      "type *.env*": "deny",
+      "* .env*": "deny",
+      "printenv*": "deny",
+      "env": "deny",
+      "set": "deny",
+      "export": "deny",
       "python -m demo_smoke prefetch*": "deny",
       "python3 -m demo_smoke prefetch*": "deny",
       ".venv/bin/python -m demo_smoke prefetch*": "deny",
@@ -128,7 +135,8 @@
       "*": "allow",
       "*.env": "deny",
       "*.env.*": "deny",
-      "*.env.example": "allow"
+      "*.env.example": "allow",
+      "*.envrc": "deny"
     },
     "edit": {
       "*": "deny",

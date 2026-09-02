@@ -295,6 +295,21 @@ def hf_weights_present(cache: str | None = None) -> dict:
 # --------------------------------------------------------------------------- doctor
 
 
+def tts_advice(device: str, os_name: str | None = None) -> str:
+    """One line on which TTS backend fits this machine (README "single-machine resource budget")."""
+    os_name = os_name or platform.system()
+    if device == "none":
+        return "torch not installed: `--tts tone` only (pip install -r requirements-tts.txt for voices)"
+    if device == "cuda":
+        return "NVIDIA GPU: `--tts turbo` on CUDA (auto picks it)"
+    if device in ("rocm", "mps"):
+        return f"{device} GPU: `--tts turbo` (auto picks it)"
+    if os_name == "Windows":
+        return ("CPU only (PyTorch has no ROCm on Windows): `--tts nano` on CPU when the installed "
+                "chatterbox has it, else `--tts turbo` on CPU (better quality, slower)")
+    return "CPU only: `--tts nano` when available, else `--tts turbo` on CPU (slower)"
+
+
 def detect(base_url: str | None = None, model: str | None = None,
            timeout: int | None = None) -> dict:
     """Doctor report.  Never raises: missing components are None/False + a hint.
@@ -372,6 +387,15 @@ def detect(base_url: str | None = None, model: str | None = None,
                     f"`python -m demo_smoke prefetch --tts {rep['tts_auto']}` while online "
                     "(or use --tts tone)"
                 )
+    rep["tts_advice"] = tts_advice(rep["torch_device"])
+    # Which of the well-known local LLM servers answer right now (short timeouts, never raises).
+    try:
+        from . import llm as _llm
+
+        rep["local_endpoints"] = _llm.probe_local_endpoints(timeout=2.0)
+    except Exception as e:  # noqa: BLE001 - doctor reports, never crashes
+        rep["local_endpoints"] = []
+        hints.append(f"local endpoint probe failed: {e}")
     if base_url:
         llm: dict = {"base_url": base_url, "model": model, "reachable": False, "tool_call": None}
         try:

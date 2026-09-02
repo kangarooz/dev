@@ -61,17 +61,35 @@ def opener_for(url: str) -> urllib.request.OpenerDirector:
     return urllib.request.build_opener()
 
 
-def _headers() -> dict:
+def _is_loopback(url: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return host in _LOOPBACK or host.startswith("127.")
+
+
+def bearer_token(url: str) -> str | None:
+    """The token to send to ``url``: ``DEMO_SMOKE_API_KEY`` always; ``OPENAI_API_KEY`` only to
+    https or non-loopback endpoints (a key exported for other tools must not go in clear
+    text to whatever listens on a local port)."""
+    key = os.environ.get("DEMO_SMOKE_API_KEY")
+    if key:
+        return key
+    key = os.environ.get("OPENAI_API_KEY")
+    if key and (url.lower().startswith("https://") or not _is_loopback(url)):
+        return key
+    return None
+
+
+def _headers(url: str, auth: bool = True) -> dict:
     h = {"Content-Type": "application/json", "Accept": "application/json"}
-    key = os.environ.get("DEMO_SMOKE_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    key = bearer_token(url) if auth else None
     if key:
         h["Authorization"] = f"Bearer {key}"
     return h
 
 
-def _request(method: str, url: str, body: dict | None, timeout: int) -> dict:
+def _request(method: str, url: str, body: dict | None, timeout: int, auth: bool = True) -> dict:
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers=_headers())
+    req = urllib.request.Request(url, data=data, method=method, headers=_headers(url, auth))
     try:
         with opener_for(url).open(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
@@ -97,13 +115,13 @@ def _request(method: str, url: str, body: dict | None, timeout: int) -> dict:
     return parsed
 
 
-def reachable(base_url: str, timeout: int = 5) -> bool:
+def reachable(base_url: str, timeout: int = 5, auth: bool = True) -> bool:
     """GET {base_url}/models; True when the server answers (any status < 500)."""
     try:
         url = normalize_base_url(base_url) + "/models"
     except LLMError:
         return False
-    req = urllib.request.Request(url, method="GET", headers=_headers())
+    req = urllib.request.Request(url, method="GET", headers=_headers(url, auth))
     try:
         with opener_for(url).open(req, timeout=timeout) as resp:
             return resp.status < 500
@@ -111,6 +129,61 @@ def reachable(base_url: str, timeout: int = 5) -> bool:
         return e.code < 500
     except (urllib.error.URLError, OSError, ValueError):
         return False
+
+
+def list_models(base_url: str, timeout: int = 10, auth: bool = True) -> list[str]:
+    """Model ids from ``GET {base_url}/models`` (OpenAI shape ``{"data": [{"id": ...}]}``).
+
+    ollama, LM Studio, llama.cpp and vLLM all answer this on their ``/v1`` root;
+    a bare list of strings/objects is accepted too.  Raises ``LLMError``.
+    """
+    url = normalize_base_url(base_url) + "/models"
+    resp = _request("GET", url, None, timeout, auth=auth)
+    if "error" in resp and "data" not in resp:
+        err = resp["error"]
+        msg = err.get("message") if isinstance(err, dict) else str(err)
+        raise LLMError(f"server error from {url}: {msg}")
+    data = resp.get("data", resp.get("models"))
+    if not isinstance(data, list):
+        raise LLMError(f"response from {url} has no 'data' list: {json.dumps(resp)[:200]}")
+    ids: list[str] = []
+    for item in data:
+        mid = item.get("id") or item.get("name") or item.get("model") if isinstance(item, dict) else item
+        if isinstance(mid, str) and mid and mid not in ids:
+            ids.append(mid)
+    return ids
+
+
+# The three local servers the kit's opencode.json knows about (name, OpenAI-style root).
+LOCAL_ENDPOINTS = (
+    ("ollama", "http://localhost:11434/v1"),
+    ("lmstudio", "http://127.0.0.1:1234/v1"),
+    ("llama.cpp", "http://127.0.0.1:8080/v1"),
+)
+
+
+def probe_local_endpoints(timeout: float = 2.0, endpoints=None) -> list[dict]:
+    """``doctor``: which of the well-known local servers answer, and their model ids.
+
+    Never raises; each entry is ``{"name", "base_url", "reachable", "models", "error"}``
+    (``models`` empty and ``error`` set when the server answers but the list fails).
+    The probe is unsolicited, so it never carries a bearer token.
+    """
+    out = []
+    for name, base_url in (endpoints if endpoints is not None else LOCAL_ENDPOINTS):
+        entry: dict = {"name": name, "base_url": base_url, "reachable": False, "models": [], "error": None}
+        try:
+            entry["models"] = list_models(base_url, timeout=timeout, auth=False)
+            entry["reachable"] = True
+        except LLMError as e:
+            msg = str(e)
+            if msg.startswith(("cannot reach", "timeout", "network error")):
+                entry["error"] = msg
+            else:   # the server answered, just not with a usable model list
+                entry["reachable"] = True
+                entry["error"] = msg
+        out.append(entry)
+    return out
 
 
 def chat(base_url: str, model: str, messages: list, tools: list | None = None,

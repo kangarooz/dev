@@ -18,8 +18,11 @@ offline-demo-smoke/
   opencode.json              local providers (ollama default; llama.cpp, lmstudio), permissions, agent, commands
   .opencode/agents/demo-smoke.md
   .opencode/commands/{setup,smoke,narrate,voice-check}.md
+  .opencode/commands/{onboard,clone-voice}.md   onboarding widget (question tool; TUI only)
+  voices/                    reference voices from record-ref (<name>.wav + <name>.json, gitignored; .gitkeep kept)
+  .env                       credentials written by `creds set` (gitignored, 0600); loaded by cli.main at start-up
   .ignore                    re-includes demo-output/ for ripgrep/OpenCode (gitignore hides it)
-  requirements.txt           playwright, numpy, soundfile, imageio-ffmpeg
+  requirements.txt           playwright, numpy, soundfile, imageio-ffmpeg, sounddevice (record-ref; ffmpeg fallback)
   requirements-tts.txt       chatterbox-tts + torch/torchaudio 2.6.0 (see README for index URLs)
   requirements-dev.txt       pytest, ruff
   scripts/setup.sh, scripts/setup.ps1
@@ -53,8 +56,8 @@ keys at all; now they always do.)
 
 | cmd | args | output |
 |---|---|---|
-| `doctor` | `[--base-url URL --model NAME] [--timeout N]` | env report: os, python, ffmpeg path+version, chrome path, torch device (cuda/rocm/mps/cpu/none), chatterbox importable + `chatterbox_nano`, HF cache path + `hf_weights` per backend, `tts_auto` (what `--tts auto` resolves to here) + `tts_ready`, ollama/OpenAI-compatible endpoint reachable, optional tool-call probe |
-| `check-model` | `--base-url URL --model NAME [--timeout N]` | sends a chat completion with one tool (`get_step_status`) and checks the model returns a tool call; PASS/FAIL |
+| `doctor` | `[--base-url URL --model NAME] [--timeout N]` | env report: os, python, ffmpeg path+version, chrome path, torch device (cuda/rocm/mps/cpu/none), chatterbox importable + `chatterbox_nano`, HF cache path + `hf_weights` per backend, `tts_auto` (what `--tts auto` resolves to here) + `tts_ready`, `tts_advice` (which backend fits this box: CUDA → turbo, Windows CPU → nano/turbo on CPU, ...), `local_endpoints` (ollama :11434, lmstudio :1234, llama.cpp :8080 probed with a 2 s timeout; `reachable` + their model ids, printed one line each as `llm: <name> <url> reachable: id, id` / `not running`), ollama/OpenAI-compatible endpoint reachable, optional tool-call probe |
+| `check-model` | `--base-url URL (--model NAME \| --list) [--timeout N]` | sends a chat completion with one tool (`get_step_status`) and checks the model returns a tool call; PASS/FAIL. `--list` instead prints the ids from `GET /v1/models` (one per line, e.g. the exact LM Studio id to copy into `opencode.json`) and logs `{"list": true, "models": [...]}`; exit 3 when the server cannot be reached, exit 4 when neither `--model` nor `--list` is given |
 | `prefetch` | `--tts auto\|turbo\|nano\|classic` | downloads Chatterbox weights into the HF cache (online step; `auto` resolves like `run --tts auto` on this machine, logged as `backend`); prints cache dir |
 | `voice-check` | `[--ref REF.wav] --out DIR --tts auto\|turbo\|nano\|classic\|tone [--online]` (omit `--ref` to use the model's default voice) | `audio/voice_check.wav` + stats (duration, peak dBFS, rms dBFS, silent, clipped) |
 | `dryrun` | `SCENARIO --out DIR [--headless]` | drives steps, `logs/step-NN-<id>.png`, `logs/smoke-results.md`, `logs/dryrun.json`; exit 2 on FAIL |
@@ -67,10 +70,40 @@ keys at all; now they always do.)
 | `verify` | `[SCENARIO] --out DIR` | `logs/verify.json`, `final/thumb-{10,50,90}.png`; exit 2 on failed checks |
 | `run` | `SCENARIO --out DIR [--tts ...] [--capture ...] [--narration template\|llm] [--ref REF] [--online] [--headless] [--base-url --model --timeout N]` | whole pipeline in order: doctor → dryrun → narrate → synth → record → edit → verify → report; `report.md`, `result.json`; `--narration llm` without `--base-url`/`--model` is bad input (exit 4) before anything runs |
 
+Onboarding commands (added with the onboarding widget; `demo_smoke/onboard_audio.py`,
+`demo_smoke/onboard_scenario.py`, `demo_smoke/dotenv.py`). They register themselves on the
+same parser (`register(subparsers, run_map)`), never raise past their handler (exit codes are
+returned; `DEMO_SMOKE_DEBUG=1` re-raises) and follow the exit-code table above.
+
+| cmd | args | output |
+|---|---|---|
+| `record-ref` | `--out voices/<name>.wav [--seconds 60] [--device N\|name] [--backend auto\|sounddevice\|ffmpeg] [--list-devices] [--script-only] [--no-countdown]` | prints the reading passage (`demo_smoke/passage.txt`, ~150 words in 3 chunks), the backend is resolved (and the input opened once, so the macOS microphone prompt appears) before the passage and the 3-2-1 countdown; records mono 48 kHz PCM16 (`auto` = sounddevice, retried once at the device's native rate and resampled, then the ffmpeg fallback: `dshow` / `avfoundation` (`:default` = the system default input) / `pulse` then `alsa`; a numeric `--device` is a sounddevice index and is never forwarded to ffmpeg), peak-normalises to -3 dBFS, trims leading/trailing silence (-40 dBFS), writes the WAV + a sidecar `voices/<name>.json` (**not** `<out>/logs/`; `--out` is a file) with `duration, peak_dbfs, rms_dbfs, noise_floor_dbfs, speech_seconds, snr_db, clipped_pct, clipped, gain_db, raw_peak_dbfs, native_sample_rate, trim, warnings[]`. Exit 4 with warnings `silent (no signal)` (raw peak below -60 dBFS: muted input, wrong device or a denied microphone permission; a targeted hint is printed) / `too short (<20 s of speech)` / `noisy (SNR < 15 dB)` / `clipped` (file still saved) or on bad input (`--out` not `.wav`, `--seconds <= 0`); exit 3 when no backend could record (nothing written); 130 on Ctrl-C. `--device N` = sounddevice index; a non-integer device name forces ffmpeg |
+| `devices` | `[--out DIR]` | audio inputs (sounddevice, or "unavailable") and screens for `--capture screen` (Windows: `desktop (gdigrab)` as index 0 + dshow "screen" devices; macOS: avfoundation `Capture screen N`; Linux: `$DISPLAY`); `logs/devices.json`; always exit 0 |
+| `creds set NAME` | `[--env-file PATH] [--value-from-stdin]` | `getpass` prompt (never echoed) or one stdin line; writes/updates `NAME=value` in `.env` (created 0600 on POSIX, duplicates collapsed, values quoted when needed); an `op://vault/item/field` value is stored verbatim and resolved at run time. Names must match `[A-Z_][A-Z0-9_]*` (exit 4 otherwise) |
+| `creds list` | `[--env-file PATH]` | names only, never values |
+| `creds check NAME...` | `[--env-file PATH]` | each name: `ok (environ\|.env\|op://)` or `MISSING (reason)`; exit 4 when any is missing. An `op://` value counts as MISSING when `op` is not on PATH or `op read` fails (reason printed) |
+| `init-scenario` | `--name "..." --url URL [--out scenarios/<slug>.json] [--login none\|form\|basic] [--username-env NAME --password-env NAME] [--login-url --username-selector --password-selector --submit-selector --success-selector] [--step "Title :: plain English" ...] [--interactive] [--force]` | writes a scaffold: intro/outro drafted from the name, one step per `--step` with `actions: []`, `expect: []` and a `todo` field holding the plain-English description. `todo` is not a scenario key, so `dryrun`/`record` reject the file until every todo is resolved and removed (the intended hand-off); `--interactive` asks for missing answers with `input()`. `--out` is the JSON file (stored as `args.scenario_out`, no `logs/` tree) |
+| `validate` | `SCENARIO [--out DIR] [--env-file PATH]` | strips `todo` from steps, runs `scenario.validate`, prints the step list; `warning:` lines for steps that still carry `todo`, have no actions or no expectations (exit 0); `validate: INVALID` + one `error:` line per problem (exit 4). `logs/validate.json` only when `--out DIR` is given (the result is otherwise stdout only) |
+| `inspect` | `URL [--login-from SCENARIO] [--headless] [--json] [--all] [--max N] [--settle-ms N] [--out DIR] [--env-file PATH]` | opens the page in Chrome and prints a compact table of inputs/buttons/links with a stable, unique selector each (`#id` → `tag[name=..]` → `tag[placeholder=..]` → `input[type=file]` → `button:has-text("..")` → `[aria-label=..]` → `tag >> nth=N`; non-unique candidates shown as `(xN)`), ids, names, placeholders, text; hidden elements skipped except file inputs; 60 rows max (links dropped first). `--login-from` logs in with that scenario's login block first (exit 2 on a failed login). `logs/inspect.json` (`--json` prints the same dict) |
+
+`.env` loading: `cli.main` calls `dotenv.load_env` before building the parser: `--env-file`
+(pre-scanned from argv) first, then `<kit>/.env`; only names not already in `os.environ` are
+exported (the environment wins), so `DEMO_SMOKE_BASE_URL` / `DEMO_SMOKE_MODEL` in `.env` also
+satisfy the required flags. `op://` values are resolved with `op read` (full path from
+`shutil.which`, so `op.cmd`/`op.exe` work on Windows); an unresolved reference is **not**
+exported (`load_env.unresolved` names it and one stderr line says so, never fatal), so
+`drive.login` reports the variable as unset instead of typing `op://...` into the app.
+`--help` / `--version` and the `creds` subcommands skip the load (`creds` takes `--env-file`
+and resolves on its own: `creds check` reports the real source and `creds set` never
+unlocks a vault to store a name). Scenario `login.username_env` / `password_env` are then
+read from `os.environ`; `drive.login` refuses a login block without both names and an
+`op://` value that reached the environment unresolved.
+
 Env overrides: `DEMO_SMOKE_CHROME` (chrome binary), `DEMO_SMOKE_FFMPEG`
 (ffmpeg binary), `DEMO_SMOKE_FFPROBE`, `DEMO_SMOKE_BASE_URL` / `DEMO_SMOKE_MODEL`
 (defaults for `--base-url` / `--model`, also where the flag is otherwise required),
-`DEMO_SMOKE_API_KEY` or `OPENAI_API_KEY` (bearer token for the LLM endpoint),
+`DEMO_SMOKE_API_KEY` (bearer token for the LLM endpoint, always sent) or `OPENAI_API_KEY`
+(sent only to https or non-loopback endpoints; `probe_local_endpoints` sends no token),
 `DEMO_SMOKE_SCREEN_INDEX` (macOS display for `--capture screen`, default 0),
 `DEMO_SMOKE_DEBUG=1` (full tracebacks), `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` /
 `HF_HOME` (Hugging Face cache, resolved in that order like huggingface_hub).
@@ -105,7 +138,11 @@ Chrome-for-Testing layout (`chrome-linux64`, `chrome-mac-*`, `chrome-win64`).
 - `verify.py` — with ffprobe (or the fallback parser): duration ≤ max_length_seconds + 10; |audio − video| ≤ 0.5 s; no black frame in the first and last 1.0 s (`blackdetect`); narration audible (`volumedetect` mean_volume > −30 dB); thumbnails at 10/50/90%. All results in `logs/verify.json` with pass/fail per check.
 - `report.py` — `report.md` (verdict, step table, checks table, artifact paths, env summary) and `result.json`.
 - `llm.py` — OpenAI-compatible helpers used by `check-model` and `narrate-llm` (urllib, timeouts, clear errors, never raises past the CLI boundary).
-- `cli.py` + `__main__.py` — argparse subcommands mapping to the table above.
+- `cli.py` + `__main__.py` — argparse subcommands mapping to the table above; `_load_dotenv(argv)` runs first, then `build_parser()` (core commands, then `onboard_audio.register` / `onboard_scenario.register`), then `args.fn(args)`. `_log_failure` skips `run` and `record-ref` (whose `--out` is a file, not a `Paths()` tree).
+- `dotenv.py` — minimal `.env` parser/writer (`NAME=value`, optional `export`, `#` comments, single/double quotes with `\n \t \" \\` unescaped) and credential resolver: `env_path`, `parse`, `read`, `names`, `format_value`, `write_value` (0600, in-place update), `is_op_ref`, `op_path`, `resolve_op` (`op read REF`, raises `OpError`), `lookup` (no `op`), `resolve` → `(value, "environ"|".env"|"op://"|"missing"|"op-error: ...")`, `load_env(env_file=None, resolve_refs=True)` → dict of names it set (`load_env.unresolved` holds the reasons).
+- `onboard_audio.py` (+ `passage.txt`) — `record-ref` and `devices`: `passage_text/passage_chunks/print_passage`; pure DSP helpers `frame_rms_db`, `normalize_peak`, `trim_silence`, `clipped_pct`, `analyze`, `warnings_for`, `process(raw, sr) -> (audio, stats)` (normalise first, then trim at -40 dBFS; noise floor = 10th percentile of 50 ms frame RMS, speech frames = > 6 dB above it, `speech_seconds` drives the "too short" warning), `write_wav16`; device listing `list_input_devices()` (sounddevice imported lazily via importlib, so the module works without it), `list_screens(os_name, ffmpeg)`, `parse_dshow_devices`, `parse_avfoundation_devices`; recording `ffmpeg_record_args(...)` (pure argv builder), `ffmpeg_candidates(os_name, device, ffmpeg)`, `record_ffmpeg` (records to `<name>.raw.wav`, deletes it even when ffmpeg times out, resamples to 48 kHz if ffmpeg ignored `-ar`; ffmpeg output is decoded as UTF-8 so dshow names with `®` survive, and the first informative stderr line is reported), `record_sounddevice` (one retry at the device's default rate), `prepare_capture` (backend resolution + input priming before the countdown), `run_capture`, `record_ref(out, seconds, device, backend, show_countdown) -> sidecar dict`; `cmd_record_ref`, `cmd_devices`, `register(subparsers, run_map)`.
+- `onboard_scenario.py` — `creds`, `init-scenario`, `validate`, `inspect`: `scaffold(...)`, `strip_todos(data)`, `validate_file(path)`, `inspect_url(...)`, `collect_elements`, `selector_candidates`, `choose_selector` (first unique candidate via `page.locator(sel).count()`), `classify`, `format_table`, the `cmd_*` handlers, `register(subparsers, run_map)` and `main(argv)` (standalone `python -m demo_smoke.onboard_scenario ...`). `inspect --login-from` calls `dotenv.load_env` itself and `drive.login`.
+- `llm.py` also has `list_models(base_url, timeout=10) -> list[str]` (`GET /v1/models`, `data[].id`; raises `LLMError`), `LOCAL_ENDPOINTS` (ollama/lmstudio/llama.cpp roots) and `probe_local_endpoints(timeout=2.0, endpoints=None) -> list[dict]` (`{"name","base_url","reachable","models","error"}`, never raises) used by `env.detect` for the doctor report; `env.tts_advice(device, os_name=None)` is the one-line TTS recommendation.
 
 ## Scenario JSON
 
@@ -135,7 +172,7 @@ Chrome-for-Testing layout (`chrome-linux64`, `chrome-mac-*`, `chrome-win64`).
 
 `login.type`: `none` | `form` (`url`, `username_selector`, `password_selector`,
 `submit_selector`, `username_env`, `password_env`, optional `success_selector`)
-| `basic` (`username_env`, `password_env`, sent as HTTP basic auth).
+| `basic` (`username_env`, `password_env`, sent as an `Authorization: Basic` header on requests to `app_url`'s origin only, never cross-origin).
 Actions: `goto` (path or absolute URL), `click` (selector), `fill`
 `{selector,text}`, `type` `{selector,text,delay_ms}`, `press` (key),
 `upload` `{selector, files[]}`, `hover` (selector), `scroll` `{selector}` or
@@ -164,6 +201,8 @@ optional wait-window speed-ups.
 - Unit: scenario validation errors, pacing math, edit timeline computation (pure function returns the list of segments + audio offsets), narration validation + template, tts `tone` backend + stats, markers I/O, verify parsing on synthetic media (`lavfi testsrc`/`sine`).
 - Browser: headless Chromium (whatever `DEMO_SMOKE_CHROME` or Chrome discovery finds; skipped when none) over CDP against `tests/fixtures/app` served by `http.server` on a random port: login form, file upload chips, ask → delayed answer with citation. Cover a PASS scenario and a FAIL scenario (wrong expectation) with exit code 2 and a failure report containing console errors.
 - E2E (`tests/test_e2e_run.py`): `run` with `--tts tone --capture screencast --narration template --headless` against the fixture app → `final/*.mp4` exists, verify passes, `result.json.verdict == "PASS"`.
+- Onboarding: `tests/fakes/sounddevice.py` (synthetic speech bursts + silence, `config` knobs for noise/level/length/failure) injected into `sys.modules` → `record-ref` trims/normalises, stats and warnings; `devices` per OS from canned ffmpeg listings; `creds set --value-from-stdin` → 0600 `.env`, `list` names only, `check` via a fake `op` script (`tests/fakes/op`, `op.cmd`) on PATH; `init-scenario` scaffold validates after `strip_todos`; `inspect` against the fixture app finds `#question`, `#ask-btn`, `#file-input`; `check-model --list` and doctor's `local_endpoints` against the conftest `FakeLLM`; `cli.main` `.env` loading (environment wins, `--env-file` first, `--version` skips it).
+- OpenCode: `tests/test_permissions_match.py` re-implements OpenCode's `Permission.evaluate` (last matching rule wins over defaults → `opencode.json` → agent frontmatter) and asserts every command the playbooks run is allowed and `creds set`/`prefetch`/`rm -rf`/`git push` are denied; `tests/test_opencode_e2e.py` runs the REAL `opencode run --agent demo-smoke --auto` under a scratch `HOME` against `tests/opencode_fake_llm.py` (a scripted OpenAI-compatible server answering JSON or SSE with the next kit command as a `bash` tool call) through doctor → dryrun → ... → verify (skipped without `OPENCODE_BIN`/Chrome).
 - Lint: `ruff check .` clean with default rules.
 
 Test tooling: `requirements.txt` + `requirements-dev.txt` (pytest, ruff) in a
@@ -270,5 +309,30 @@ def opener_for(url: str) -> urllib.request.OpenerDirector                       
 class LLMError(RuntimeError)
 
 # demo_smoke/cli.py
-def main(argv: list[str] | None = None) -> int       # exit code; __main__ calls sys.exit(main())
+def main(argv: list[str] | None = None) -> int       # exit code; __main__ calls sys.exit(main()); loads .env first
+def build_parser() -> argparse.ArgumentParser        # core commands + onboard_audio.register + onboard_scenario.register
+
+# demo_smoke/llm.py (onboarding additions)
+def list_models(base_url: str, timeout: int = 10) -> list[str]                    # GET /v1/models ids; raises LLMError
+def probe_local_endpoints(timeout: float = 2.0, endpoints=None) -> list[dict]     # [{"name","base_url","reachable","models","error"}]
+
+# demo_smoke/env.py (onboarding additions)
+def tts_advice(device: str, os_name: str | None = None) -> str                    # doctor "tts:" line
+
+# demo_smoke/dotenv.py
+def load_env(env_file: str | Path | None = None, resolve_refs: bool = True) -> dict[str, str]   # exports unset names; load_env.unresolved
+def resolve(name: str, env_file=None) -> tuple[str | None, str]                   # environ -> .env -> op://
+def write_value(env_file, name: str, value: str) -> Path                          # 0600, in-place update
+
+# demo_smoke/onboard_audio.py
+def process(raw: "np.ndarray", sr: int) -> tuple["np.ndarray", dict]              # normalise + trim + stats
+def record_ref(out: Path, seconds: float = 60, device: str | None = None, backend: str = "auto",
+               show_countdown: bool = True) -> dict                               # sidecar dict (exit_code inside)
+def register(subparsers, run_map: dict) -> None                                   # record-ref, devices
+
+# demo_smoke/onboard_scenario.py
+def scaffold(name: str, url: str, steps: list[tuple[str, str]], login: str = "none", ...) -> dict   # (title, todo) pairs
+def strip_todos(data: dict) -> list[str]                                          # removes step "todo" keys, returns warnings
+def register(subparsers, run_map: dict) -> None                                   # creds, init-scenario, validate, inspect
+def main(argv: list[str] | None = None) -> int
 ```

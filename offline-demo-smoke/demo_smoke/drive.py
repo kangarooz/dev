@@ -15,7 +15,10 @@ import logging
 import os
 import re
 import time
+import urllib.parse
 from pathlib import Path
+
+from . import dotenv
 
 log = logging.getLogger(__name__)
 
@@ -364,8 +367,45 @@ def _poll_expectations(page, expects: list, deadline_mono: float, clock) -> tupl
 
 
 # --------------------------------------------------------------------------- login
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    """``(scheme, host, port)`` with the default port filled in, for same-origin checks."""
+    u = urllib.parse.urlsplit(url or "")
+    scheme = (u.scheme or "http").lower()
+    try:
+        port = u.port
+    except ValueError:
+        port = None
+    return scheme, (u.hostname or "").lower(), port or _DEFAULT_PORTS.get(scheme)
+
+
+def install_basic_auth(page, app_url: str, username: str, password: str) -> None:
+    """Attach ``Authorization: Basic`` to requests for the app's own origin only.
+
+    ``page.set_extra_http_headers`` would send the credentials with every request the
+    page makes, including cross-origin ones (CDN scripts, fonts, analytics), so the
+    header is added per request from a route handler that checks scheme, host and port.
+    """
+    token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
+    origin = _origin(app_url)
+
+    def add_auth(route, request) -> None:
+        if _origin(request.url) == origin:
+            route.continue_(headers={**request.headers, "authorization": f"Basic {token}"})
+        else:
+            route.continue_()
+
+    page.route("**/*", add_auth)
+
+
 def login(page, scenario: dict) -> str | None:
-    """Perform the scenario login. Returns ``None`` on success, else a one-line error."""
+    """Perform the scenario login. Returns ``None`` on success, else a one-line error.
+
+    Credentials come from the environment variables named by ``username_env`` /
+    ``password_env`` only, never from literal values in the scenario file.
+    """
     cfg = scenario.get("login") or {"type": "none"}
     kind = str(cfg.get("type", "none")).lower()
     if kind == "none":
@@ -373,15 +413,18 @@ def login(page, scenario: dict) -> str | None:
     try:
         user_env = cfg.get("username_env")
         pass_env = cfg.get("password_env")
-        username = os.environ.get(user_env, "") if user_env else str(cfg.get("username", ""))
-        password = os.environ.get(pass_env, "") if pass_env else str(cfg.get("password", ""))
-        if user_env and user_env not in os.environ:
-            return f"login: environment variable {user_env} is not set"
-        if pass_env and pass_env not in os.environ:
-            return f"login: environment variable {pass_env} is not set"
+        if not user_env or not pass_env:
+            return "login: username_env and password_env are required (credentials never come from the scenario file)"
+        for var in (user_env, pass_env):
+            if var not in os.environ:
+                return f"login: environment variable {var} is not set"
+        username, password = os.environ[user_env], os.environ[pass_env]
+        for var, value in ((user_env, username), (pass_env, password)):
+            if dotenv.is_op_ref(value):
+                return (f"login: {var} is an unresolved op:// reference "
+                        f"(run `python -m demo_smoke creds check {var}`)")
         if kind == "basic":
-            token = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
-            page.set_extra_http_headers({"Authorization": f"Basic {token}"})
+            install_basic_auth(page, scenario.get("app_url", ""), username, password)
             return None
         if kind == "form":
             url = _resolve_url(scenario.get("app_url", ""), cfg.get("url") or "/")

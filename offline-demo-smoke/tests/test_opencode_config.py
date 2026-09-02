@@ -36,6 +36,8 @@ KIT_BASH_ALLOW = [
     "git diff*",
 ]
 KIT_BASH_DENY = ["rm -rf *", "del *", "git push*",
+                 # .env is denied to the read tool; these keep bash from reopening it
+                 "cat *.env*", "type *.env*", "* .env*", "printenv*", "env", "set", "export",
                  # the two kit commands that reach the network are denied even under --auto
                  "python -m demo_smoke prefetch*", "python3 -m demo_smoke prefetch*",
                  ".venv/bin/python -m demo_smoke prefetch*", ".venv\\Scripts\\python.exe -m demo_smoke prefetch*",
@@ -149,7 +151,8 @@ def test_local_providers(config):
     for mid, m in ollama.items():
         assert m["limit"]["context"] <= 32768, mid
     assert list(prov["llama.cpp"]["models"]) == ["local"]
-    assert list(prov["lmstudio"]["models"]) == ["local"]
+    # "your-model-id" is the placeholder the README tells people to replace with a `check-model --list` id
+    assert list(prov["lmstudio"]["models"]) == ["local", "your-model-id"]
 
 
 def test_model_ids_exist_under_providers(config):
@@ -196,7 +199,7 @@ def test_single_source_of_truth_for_agent(config):
 def test_agent_frontmatter(agent):
     fm, _body = agent
     assert fm["mode"] == "primary"
-    assert fm["steps"] == 40
+    assert fm["steps"] == 60          # /onboard with its single retries needs more than /smoke's 16-20 calls
     assert fm["temperature"] == pytest.approx(0.1)
     assert fm["description"]
     perm = fm["permission"]

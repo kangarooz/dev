@@ -224,9 +224,9 @@ def load_env(env_file: str | Path | None = None, resolve_refs: bool = True) -> d
     """Export ``.env`` names that are not already in ``os.environ``; return what was set.
 
     ``op://`` values are resolved through the 1Password CLI when it is on PATH;
-    when it is missing or fails the raw reference is exported unchanged (so
-    ``creds check`` can still explain it) and ``load_env.unresolved`` maps that
-    name to the reason after the call.
+    when it is missing or fails the name is **not** exported (a raw ``op://...``
+    string in ``os.environ`` would be typed into a login form as the password)
+    and ``load_env.unresolved`` maps that name to the reason after the call.
     """
     loaded: dict[str, str] = {}
     unresolved: dict[str, str] = {}
@@ -238,6 +238,7 @@ def load_env(env_file: str | Path | None = None, resolve_refs: bool = True) -> d
                 value = resolve_op(value)
             except OpError as e:
                 unresolved[name] = str(e)
+                continue
         os.environ[name] = value
         loaded[name] = value
     load_env.unresolved = unresolved  # type: ignore[attr-defined]

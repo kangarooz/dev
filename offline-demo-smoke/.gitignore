@@ -22,3 +22,11 @@ venv/
 raw/frames/
 tests/**/out/
 tests/**/tmp/
+
+# credentials (creds set) and recorded reference voices (record-ref)
+.env
+.env.*
+!.env.example
+voices/*.wav
+voices/*.json
+!voices/.gitkeep

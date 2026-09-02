@@ -3,6 +3,7 @@ fakes injected into ``sys.modules`` so these tests exercise orchestration, exit
 codes, logs and the report without a browser."""
 
 import json
+import os
 import sys
 import time
 import types
@@ -136,8 +137,9 @@ def test_check_model(out_dir, fake_llm, capsys, unreachable_url):
     assert "not reachable" in capsys.readouterr().err
     log = json.loads((out_dir / "logs" / "check-model.json").read_text())
     assert log["exit_code"] == 3 and log["error"].startswith("check-model:") and log["pass"] is False
-    assert run("check-model", "--base-url", fake_llm.base_url) == 4   # --model required
-    assert json.loads((out_dir / "logs" / "check-model.json").read_text())["pass"] is False
+    assert run("check-model", "--base-url", fake_llm.base_url, "--out", out_dir) == 4   # --model required
+    log = json.loads((out_dir / "logs" / "check-model.json").read_text())
+    assert log["exit_code"] == 4 and log["model"] is None and log["pass"] is False
 
 
 def test_llm_env_vars_satisfy_required_flags(out_dir, fake_llm, monkeypatch, capsys):
@@ -468,3 +470,93 @@ def test_json_safe_scenario_roundtrip(out_dir, simple_scenario_path):
     again = cli._scenario_for(types.SimpleNamespace(scenario=None), paths)
     assert isinstance(again["_dir"], Path) and again["slug"] == scen["slug"]
     assert scenario.validate(again) == []
+
+
+# --------------------------------------------------------------------------- onboarding wiring
+
+
+def test_check_model_list(out_dir, fake_llm, capsys, unreachable_url):
+    assert run("check-model", "--base-url", fake_llm.base_url, "--list", "--out", out_dir) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("check-model: 1 model(s) at") and "\n  fake-model" in out
+    log = json.loads((out_dir / "logs" / "check-model.json").read_text())
+    assert log["models"] == ["fake-model"] and log["list"] is True and "error" not in log
+    assert run("check-model", "--base-url", unreachable_url, "--list", "--out", out_dir) == 3
+    assert "cannot list models" in capsys.readouterr().err
+    log = json.loads((out_dir / "logs" / "check-model.json").read_text())
+    assert log["exit_code"] == 3 and log["models"] == [] and log["error"].startswith("check-model:")
+    # --list needs no --model; without either it is bad input with a logged reason
+    assert run("check-model", "--base-url", fake_llm.base_url, "--out", out_dir) == 4
+    assert "--model" in capsys.readouterr().err
+    log = json.loads((out_dir / "logs" / "check-model.json").read_text())
+    assert log["exit_code"] == 4 and log["pass"] is False
+
+
+def test_doctor_probes_local_endpoints(out_dir, fake_llm, capsys, fake_chrome, monkeypatch, unreachable_url):
+    from demo_smoke import llm as llm_mod
+
+    monkeypatch.setattr(llm_mod, "LOCAL_ENDPOINTS", (("fakestudio", fake_llm.base_url), ("ollama", unreachable_url)))
+    assert run("doctor", "--out", out_dir) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("doctor: ok ffmpeg=ok chrome=ok") and " local_llm=fakestudio " in out
+    assert f"llm: fakestudio {fake_llm.base_url} reachable: fake-model" in out
+    assert f"llm: ollama {unreachable_url} not running" in out
+    assert "\n  tts: " in out
+    rep = json.loads((out_dir / "logs" / "doctor.json").read_text())
+    eps = {e["name"]: e for e in rep["local_endpoints"]}
+    assert eps["fakestudio"]["reachable"] is True and eps["fakestudio"]["models"] == ["fake-model"]
+    assert eps["ollama"]["reachable"] is False and eps["ollama"]["models"] == [] and eps["ollama"]["error"]
+    assert rep["tts_advice"]
+    assert "error" not in rep
+
+
+def _forget_env(monkeypatch, *names) -> None:
+    """Pin the names as absent for the test *and* the teardown: ``delenv`` on an absent name records
+    nothing, so a value that ``load_env`` exports later would leak into the following tests."""
+    for name in names:
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+
+
+def test_main_loads_kit_dotenv_before_parsing(out_dir, fake_llm, capsys, monkeypatch, tmp_path,
+                                              example_scenario_path):
+    from demo_smoke import dotenv
+
+    _forget_env(monkeypatch, "DEMO_SMOKE_MODEL", "DEMO_SMOKE_BASE_URL", "DEMO_SMOKE_EXTRA")
+    kit_env = tmp_path / "kit.env"
+    kit_env.write_text(f"DEMO_SMOKE_MODEL=dotenv-model\nDEMO_SMOKE_BASE_URL={fake_llm.base_url}\n"
+                       "DEMO_SMOKE_EXTRA=from-kit\n")
+    monkeypatch.setattr(dotenv, "DEFAULT_ENV_FILE", kit_env)
+    fake_llm.queue.append({"tool_calls": [{"name": "get_step_status", "arguments": {"step_id": "open"}}]})
+    assert run("check-model", "--out", out_dir) == 0         # required flags satisfied from .env
+    assert "model=dotenv-model" in capsys.readouterr().out
+    assert fake_llm.last_body["model"] == "dotenv-model"
+    # the environment wins over .env, and --env-file wins over the kit .env
+    monkeypatch.setenv("DEMO_SMOKE_MODEL", "env-model")
+    other = tmp_path / "other.env"
+    other.write_text("DEMO_SMOKE_EXTRA=from-other\n")
+    monkeypatch.delenv("DEMO_SMOKE_EXTRA", raising=False)
+    monkeypatch.delenv("DEMO_SMOKE_BASE_URL", raising=False)
+    assert run("validate", example_scenario_path, "--env-file", str(other), "--out", out_dir) == 0
+    assert os.environ["DEMO_SMOKE_MODEL"] == "env-model" and os.environ["DEMO_SMOKE_EXTRA"] == "from-other"
+    assert os.environ["DEMO_SMOKE_BASE_URL"] == fake_llm.base_url
+    # the creds subcommands resolve names themselves and never export .env
+    monkeypatch.delenv("DEMO_SMOKE_EXTRA", raising=False)
+    assert run("creds", "list", "--env-file", str(other)) == 0
+    assert "DEMO_SMOKE_EXTRA" not in os.environ
+    # --version / --help never touch .env
+    monkeypatch.delenv("DEMO_SMOKE_EXTRA", raising=False)
+    assert run("--version") == 0
+    assert "DEMO_SMOKE_EXTRA" not in os.environ
+
+
+def test_onboarding_commands_are_wired(capsys, tmp_path, monkeypatch):
+    assert run("record-ref", "--script-only") == 0
+    assert "part 1/" in capsys.readouterr().out
+    assert run("record-ref", "--out", str(tmp_path / "v.txt")) == 4   # bad input handled by the handler itself
+    assert not (tmp_path / "v.txt").exists() and not list(tmp_path.glob("**/logs"))
+    scen = tmp_path / "s.json"
+    assert run("init-scenario", "--name", "Wired", "--url", "http://localhost:1", "--out", str(scen)) == 0
+    assert run("validate", str(scen), "--out", str(tmp_path / "o")) == 0
+    assert run("devices", "--out", str(tmp_path / "o")) == 0
+    assert (tmp_path / "o" / "logs" / "devices.json").is_file()

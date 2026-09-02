@@ -17,7 +17,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import __version__
+from . import __version__, dotenv, onboard_audio, onboard_scenario
 from .env import Paths
 from .scenario import ScenarioError
 
@@ -146,6 +146,9 @@ def cmd_doctor(args) -> int:
         if args.model and tc:
             bits.append(f"tool_call={'PASS' if tc.get('pass') else 'FAIL'}")
     bits.append(f"opencode={'ok' if rep.get('opencode') else 'MISSING'}")
+    endpoints = rep.get("local_endpoints") or []
+    up = [e["name"] for e in endpoints if e.get("reachable")]
+    bits.append("local_llm=" + (",".join(up) if up else "none"))
     problems = [k for k in ("ffmpeg", "chrome") if not rep.get(k)]
     if args.base_url and not llm.get("reachable"):
         problems.append("llm unreachable")
@@ -158,6 +161,16 @@ def cmd_doctor(args) -> int:
     _log(paths, "doctor", rep)
     _say(f"doctor: {'ok' if ok else 'PROBLEMS'} " + " ".join(bits)
          + f" (details: {paths.logs / 'doctor.json'})")
+    if rep.get("tts_advice"):
+        _say(f"  tts: {rep['tts_advice']}")
+    for e in endpoints:
+        if e.get("reachable"):
+            models = e.get("models") or []
+            shown = ", ".join(models[:8]) + (f", ... ({len(models)} total)" if len(models) > 8 else "")
+            _say(f"  llm: {e['name']} {e['base_url']} reachable: "
+                 + (shown if models else f"no models listed ({e.get('error') or 'empty list'})"))
+        else:
+            _say(f"  llm: {e['name']} {e['base_url']} not running")
     for h in rep.get("hints", []):
         _say(f"  hint: {h}")
     return EXIT_OK if ok else EXIT_ERROR
@@ -166,6 +179,29 @@ def cmd_doctor(args) -> int:
 def cmd_check_model(args) -> int:
     llm = _mod("llm")
     paths = Paths(args.out)
+    if args.list:
+        try:
+            models = llm.list_models(args.base_url, timeout=min(args.timeout, 30))
+        except llm.LLMError as e:
+            msg = f"cannot list models at {args.base_url}: {e}"
+            _log(paths, "check-model", {"list": True, "base_url": args.base_url, "models": [],
+                                        "pass": False, "detail": str(e),
+                                        "error": f"check-model: {msg}", "exit_code": EXIT_ERROR})
+            _err(msg)
+            return EXIT_ERROR
+        _log(paths, "check-model", {"list": True, "base_url": args.base_url, "models": models})
+        _say(f"check-model: {len(models)} model(s) at {args.base_url}"
+             + ("" if models else " (none loaded: load one in the server UI, or `ollama pull`)"))
+        for mid in models:
+            _say(f"  {mid}")
+        return EXIT_OK
+    if not args.model:
+        _log(paths, "check-model", {"pass": False, "detail": "no model given", "base_url": args.base_url,
+                                    "model": None, "error": "check-model: --model NAME is required "
+                                    "(or --list to see the ids the server offers)",
+                                    "exit_code": EXIT_BAD_INPUT})
+        _err("check-model: --model NAME is required (or DEMO_SMOKE_MODEL, or --list to see the ids)")
+        return EXIT_BAD_INPUT
     if not llm.reachable(args.base_url):
         msg = f"LLM endpoint not reachable at {args.base_url} (is the server running?)"
         _log(paths, "check-model", {"pass": False, "detail": "endpoint unreachable",
@@ -482,15 +518,17 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--out", default=None if required else DEFAULT_OUT, required=required,
                         help=f"output directory (default: {DEFAULT_OUT})")
 
-    def llm_args(sp, required=False):
+    def llm_args(sp, required=False, model_required=None):
         # DEMO_SMOKE_BASE_URL / DEMO_SMOKE_MODEL satisfy a required flag (argparse ignores
         # defaults on required options, so only require when the env var is unset).
         base_default = os.environ.get("DEMO_SMOKE_BASE_URL") or None
         model_default = os.environ.get("DEMO_SMOKE_MODEL") or None
+        if model_required is None:
+            model_required = required
         sp.add_argument("--base-url", required=required and base_default is None, default=base_default,
                         help="OpenAI-compatible base URL, e.g. http://localhost:11434/v1 "
                              "(env: DEMO_SMOKE_BASE_URL)")
-        sp.add_argument("--model", required=required and model_default is None, default=model_default,
+        sp.add_argument("--model", required=model_required and model_default is None, default=model_default,
                         help="model name, e.g. qwen3-coder:30b (env: DEMO_SMOKE_MODEL)")
         sp.add_argument("--timeout", type=int, default=180, help="LLM request timeout (s)")
 
@@ -506,8 +544,10 @@ def build_parser() -> argparse.ArgumentParser:
     out_arg(sp)
     sp.set_defaults(fn=cmd_doctor)
 
-    sp = sub.add_parser("check-model", help="does the model return a tool call?")
-    llm_args(sp, required=True)
+    sp = sub.add_parser("check-model", help="does the model return a tool call? (--list: model ids)")
+    llm_args(sp, required=True, model_required=False)   # --model checked in cmd_check_model (--list needs none)
+    sp.add_argument("--list", action="store_true",
+                    help="print the model ids the server offers (GET /v1/models) and exit")
     out_arg(sp)
     sp.set_defaults(fn=cmd_check_model)
 
@@ -577,10 +617,57 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--headless", action="store_true")
     llm_args(sp)
     sp.set_defaults(fn=cmd_run)
+
+    # Onboarding commands (record-ref, devices, creds, init-scenario, validate, inspect); each one
+    # sets its own --out semantics and fn= so the dispatch in main() is unchanged.
+    run_map: dict = {}
+    onboard_audio.register(sub, run_map)
+    onboard_scenario.register(sub, run_map)
     return p
 
 
+# Commands whose --out is not a Paths() output directory (record-ref writes a WAV file).
+_NO_PATHS_OUT = ("record-ref",)
+
+
+def _load_dotenv(argv: list[str] | None) -> None:
+    """Export ``<kit>/.env`` (and ``--env-file``) into ``os.environ`` for names not already set.
+
+    Runs before the parser is built so ``DEMO_SMOKE_BASE_URL`` / ``DEMO_SMOKE_MODEL`` from
+    ``.env`` also satisfy the required flags.  ``op://`` values are resolved through the
+    1Password CLI; a failure is one stderr line, never a crash (``creds check`` explains it).
+    ``--help`` / ``--version`` skip it (no point unlocking a vault to print usage), and so do
+    the ``creds`` subcommands: they take ``--env-file`` and resolve names themselves, so
+    ``creds check`` reports the real source (``.env`` / ``op://``) and ``creds set`` never
+    runs ``op`` for an unrelated name.
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if not argv or any(a in ("-h", "--help", "--version") for a in argv):
+        return
+    if next((a for a in argv if not a.startswith("-")), None) == "creds":
+        return
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--env-file", dest="env_file", default=None)
+    try:
+        ns, _ = pre.parse_known_args(argv)
+    except SystemExit:
+        ns = None
+    files: list = []
+    if ns is not None and ns.env_file:
+        files.append(ns.env_file)
+    files.append(None)   # the kit's own .env (a missing file is a no-op)
+    for f in files:
+        try:
+            dotenv.load_env(f)
+        except Exception as e:  # noqa: BLE001 - a broken .env must not block any command
+            _err(f"could not load {dotenv.env_path(f)}: {e}")
+            continue
+        for name, why in dotenv.load_env.unresolved.items():
+            _err(f"{name}: not exported, unresolved op:// reference ({why})")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _load_dotenv(argv)
     parser = build_parser()
     try:
         args = parser.parse_args(argv)
@@ -607,7 +694,7 @@ def main(argv: list[str] | None = None) -> int:
 def _log_failure(args, msg: str, code: int) -> None:
     """``<out>/logs/<cmd>.json`` = {"error", "exit_code"} on exit 3/4 (``run`` writes its own)."""
     out = getattr(args, "out", None)
-    if not out or getattr(args, "cmd", "") == "run":
+    if not out or getattr(args, "cmd", "") == "run" or getattr(args, "cmd", "") in _NO_PATHS_OUT:
         return
     try:
         _log(Paths(out), args.cmd, {"error": msg, "exit_code": code})

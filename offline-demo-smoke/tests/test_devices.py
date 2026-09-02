@@ -102,6 +102,22 @@ def test_list_input_devices_without_sounddevice(no_sounddevice):
     res = oa.list_input_devices()
     assert res["available"] is False and res["devices"] == []
     assert "sounddevice" in res["note"] and "ffmpeg" in res["note"]
+    assert "pip install sounddevice" in res["note"] and "libportaudio2" not in res["note"]
+
+
+def test_list_input_devices_labels_host_apis_when_there_are_several(fake_sounddevice, monkeypatch):
+    """Windows lists each microphone under MME, DirectSound, WASAPI and WDM-KS: label the entries."""
+    monkeypatch.setattr(fake_sounddevice, "query_hostapis",
+                        lambda index=None: [{"name": "MME"}, {"name": "Windows WASAPI"}])
+    devs = [{"name": "Microphone (Realtek(R) Audio", "max_input_channels": 2, "hostapi": 0},
+            {"name": "Microphone (Realtek(R) Audio)", "max_input_channels": 2, "hostapi": 1},
+            {"name": "Odd", "max_input_channels": 1, "hostapi": 9}]
+    monkeypatch.setattr(fake_sounddevice, "query_devices", lambda device=None, kind=None: devs)
+    names = [d["name"] for d in oa.list_input_devices()["devices"]]
+    assert names == ["Microphone (Realtek(R) Audio [MME]", "Microphone (Realtek(R) Audio) [Windows WASAPI]", "Odd"]
+    # one host API (Linux ALSA, macOS Core Audio): no label
+    monkeypatch.setattr(fake_sounddevice, "query_hostapis", lambda index=None: [{"name": "ALSA"}])
+    assert oa.list_input_devices()["devices"][0]["name"] == "Microphone (Realtek(R) Audio"
 
 
 def test_list_input_devices_query_failure(fake_sounddevice, monkeypatch):

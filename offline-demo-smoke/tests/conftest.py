@@ -80,6 +80,7 @@ class FakeLLM:
     def __init__(self) -> None:
         self.queue: list[dict] = []
         self.requests: list[dict] = []
+        self.gets: list[dict] = []        # {"path", "headers"} for every GET (e.g. /v1/models)
         self.default: dict = {"content": "Hello from the fake model."}
         self.models_status = 200
         self._server: ThreadingHTTPServer | None = None
@@ -106,6 +107,7 @@ class FakeLLM:
                 self.wfile.write(data)
 
             def do_GET(self):
+                fake.gets.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if self.path.rstrip("/").endswith("/v1/models"):
                     self._send(fake.models_status, {"object": "list", "data": [{"id": "fake-model"}]})
                 else:
@@ -114,7 +116,8 @@ class FakeLLM:
             def do_POST(self):
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n).decode("utf-8") or "{}")
-                fake.requests.append({"path": self.path, "body": body})
+                fake.requests.append({"path": self.path, "body": body,
+                                      "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if not self.path.rstrip("/").endswith("/v1/chat/completions"):
                     self._send(404, {"error": {"message": "not found"}})
                     return

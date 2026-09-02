@@ -2,7 +2,7 @@
 description: Synthesize one test sentence in the cloned voice (arg - reference WAV path, inside the kit directory)
 agent: demo-smoke
 ---
-Check that voice cloning works with the reference clip `$1` (a path inside the kit directory, e.g. `voice/ref.wav`; clips outside it trigger a permission prompt).
+Check that voice cloning works with the reference clip `$1` (a path inside the kit directory, e.g. `voices/mine.wav`, which `/clone-voice` writes; clips outside it trigger a permission prompt).
 
 If the reference clip above is empty (the backticks hold nothing), do not run anything: ask the user for the WAV path inside the kit directory and stop.
 

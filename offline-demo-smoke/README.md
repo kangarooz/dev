@@ -29,7 +29,7 @@ narration text. Everything else is deterministic Python.
 | ffmpeg | Optional. `imageio-ffmpeg` bundles a static build (libx264, aac, loudnorm). A system `ffmpeg` on PATH is used first if present; 4.2 or newer is enough. |
 | A local LLM server | Only for the OpenCode agent path or `--narration llm`: Ollama (default), llama.cpp `llama-server`, or LM Studio. Not needed for the no-LLM path. |
 | OpenCode | Only for the agent path (`opencode run ...`, `/smoke`). Install it while online (see below); `doctor` prints `opencode=ok|MISSING`. |
-| A reference clip | 30-90 s WAV of clean, single-speaker speech, no music, speech starting within the first second. Chatterbox conditions on roughly the first 10 s, so the opening must be good. Only for voice cloning; `--tts tone` needs nothing. Keep it inside the kit directory (e.g. `voice/ref.wav`, `*.wav` is gitignored) so the OpenCode agent can read it without a permission prompt. |
+| A reference clip | 30-90 s WAV of clean, single-speaker speech, no music, speech starting within the first second. Chatterbox conditions on roughly the first 10 s, so the opening must be good. Only for voice cloning; `--tts tone` needs nothing. Keep it inside the kit directory, in `voices/` where `record-ref` and `/clone-voice` write theirs (e.g. `voices/mine.wav`; `*.wav` is gitignored), so the OpenCode agent can read it without a permission prompt. |
 | Disk / GPU | Chatterbox Turbo weights ~2 GB; Nano ~1 GB. GPU optional (see TTS choice). Intel Macs: no torch 2.6.0 wheel, so voice cloning needs Apple Silicon, Linux or Windows (`--tts tone` still works). |
 
 ## Online preparation (do this once, with internet)
@@ -105,14 +105,14 @@ Playwright's own browsers are **not** needed (`playwright install` is not run); 
 
 The example scenario targets a Legion build at `http://localhost:3000` that
 exposes `/login` and `/manuals`; its form login reads `DEMO_USER` / `DEMO_PASS`.
-Copy your reference clip into the kit first (e.g. `voice/ref.wav`).
+Copy your reference clip into the kit first (e.g. `voices/mine.wav`; `/clone-voice` records one there for you).
 
 ```bash
 source .venv/bin/activate
 python -m demo_smoke doctor                   # everything ok/MISSING on one line
-python -m demo_smoke voice-check --ref voice/ref.wav      # listen to demo-output/audio/voice_check.wav
+python -m demo_smoke voice-check --ref voices/mine.wav    # listen to demo-output/audio/voice_check.wav
 export DEMO_USER=alice DEMO_PASS=secret       # credentials live in the environment, never on the kit's command line
-python -m demo_smoke run scenarios/example-chat-with-manuals.json --out demo-output/chat-with-manuals --ref voice/ref.wav --tts auto --narration template
+python -m demo_smoke run scenarios/example-chat-with-manuals.json --out demo-output/chat-with-manuals --ref voices/mine.wav --tts auto --narration template
 ```
 
 ```powershell
@@ -148,7 +148,7 @@ cd tests/fixtures/app && python -m http.server 8765 --bind 127.0.0.1
 cd tests\fixtures\app; python -m http.server 8765 --bind 127.0.0.1
 ```
 
-In another, from the kit directory (`--tts tone` is a synthetic beep; add `--ref voice/ref.wav --tts auto` once Chatterbox is installed):
+In another, from the kit directory (`--tts tone` is a synthetic beep; add `--ref voices/mine.wav --tts auto` once Chatterbox is installed):
 
 ```bash
 python -m demo_smoke run tests/fixtures/scenarios/fixture-pass.json --out demo-output/fixture --tts tone --headless
@@ -280,7 +280,7 @@ unattended runs on servers without a display.
 You do not need a language model at all:
 
 ```bash
-python -m demo_smoke run scenarios/my-feature.json --narration template --ref voice/ref.wav
+python -m demo_smoke run scenarios/my-feature.json --narration template --ref voices/mine.wav
 ```
 
 `--narration template` builds the narration from the scenario's own `intro`,
@@ -295,7 +295,8 @@ pinned down in three places:
 
 - `opencode.json` - local providers (`ollama`, `llama.cpp`, `lmstudio`), default
   model `ollama/qwen3-coder:30b`, permissions (web denied, bash limited to the kit's
-  commands with `creds set`, `prefetch` and `--online` denied outright, `.env` unreadable,
+  commands with `creds set`, `prefetch` and `--online` denied outright, `.env` denied to the
+  read tool and to `cat`/`type`/`printenv`/`env`,
   edits limited to `demo-output/**`, `scenarios/*.json` and `narration.json`),
   sharing and auto-update disabled. It sets no `enabled_providers`/`disabled_providers`,
   so the providers you authenticated in OpenCode itself stay available (see the next section).
@@ -317,9 +318,9 @@ export OPENCODE_DISABLE_MODELS_FETCH=1                          # no catalog ref
 export OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS=1200000    # CPU synth / a 90 s recording outlive the default bash timeout
 export DEMO_USER=alice DEMO_PASS=secret                         # before starting opencode; the agent never puts them on a command line
 opencode run --agent demo-smoke --auto --command smoke "scenarios/example-chat-with-manuals.json demo-output/chat-with-manuals"
-opencode run --agent demo-smoke --auto --command smoke "scenarios/x.json demo-output/x headless voice/ref.wav"
+opencode run --agent demo-smoke --auto --command smoke "scenarios/x.json demo-output/x headless voices/mine.wav"
 opencode run --agent demo-smoke --auto --model ollama/devstral:24b --command smoke "scenarios/x.json demo-output/x"
-opencode run --agent demo-smoke --auto --command voice-check "voice/ref.wav"
+opencode run --agent demo-smoke --auto --command voice-check "voices/mine.wav"
 opencode run --agent demo-smoke --auto --command narrate "scenarios/x.json demo-output/x"
 ```
 
@@ -343,9 +344,12 @@ steps; microphone and voice name) and only work here in the TUI.
 
 The playbook in the agent is written for small models: exact commands, one
 tool call per step, read the JSON after each command, stop on exit code 2 or 3,
-never write code. The mandated sequence is about 16-20 tool calls (8 commands,
-a log read after each, the narration write and the venv check); the agent's
-`steps: 40` leaves room for one narration retry and the report.
+never write code. The mandated `/smoke` sequence is about 16-20 tool calls (8 commands,
+a log read after each, the narration write and the venv check) plus one narration
+retry. `/onboard` is longer: up to fifteen questions, the login-page and app inspects,
+the scenario write, validate and dryrun with their log reads, and the single retries
+the command file allows come to 35-45 calls on a bumpy run. The agent's `steps: 60`
+covers both with room for the report; at the limit OpenCode forces a text-only answer.
 
 ## Validate with a hosted model first, then go local
 
@@ -454,14 +458,19 @@ command), never under `opencode run`.
   `/clone-voice nick` runs devices, asks for the microphone and name, records, runs
   `voice-check` and gives a GOOD / RE-RECORD verdict.
 - **Credentials.** `python -m demo_smoke creds set DEMO_PASS` prompts without echo and
-  writes `DEMO_PASS=...` to the kit's `.env` (mode 0600, gitignored; the value may be a
+  writes `DEMO_PASS=...` to the kit's `.env` (0600 on macOS/Linux; on Windows it inherits the
+  kit folder's ACL, so keep the kit under your own user profile, not in a shared folder;
+  gitignored; the value may be a
   1Password reference such as `op://vault/item/field`, resolved at run time through the
   `op` CLI). `creds list` prints names only; `creds check DEMO_USER DEMO_PASS` says
   whether each resolves (environment, `.env` or `op://`; exit 4 lists the missing names).
   Every kit command loads `.env` at start, and a variable already in the environment
   wins. The agent may run `creds list` / `creds check`, but `creds set` is denied for it
-  (it needs your terminal) and `.env` is unreadable for it; `/onboard` prints the exact
-  `creds set` lines for you to run.
+  (it needs your terminal), and `.env` is denied to its read tool and to `cat`, `type`,
+  `printenv`, `env`, `set` and `export`. That deny list is not a sandbox: under `--auto`
+  any other bash command is approved, so keep secrets out of the shell that starts
+  `opencode` if you do not trust the model. `/onboard` prints the exact `creds set`
+  lines for you to run.
 - **Scenario.** `python -m demo_smoke init-scenario --name "Chat with Manuals" --url http://localhost:3000 --out scenarios/chat-with-manuals.json --login form --username-env DEMO_USER --password-env DEMO_PASS --step "Open the app :: see the home screen" --step "Ask :: type a question and see a cited answer"`
   writes a valid scaffold whose steps carry a `todo` instead of selectors
   (`--interactive` asks the same questions in the terminal). `python -m demo_smoke inspect http://localhost:3000 [--login-from scenarios/x.json] [--headless]`
@@ -583,11 +592,13 @@ company's video host; the file needs no re-encoding.
   under `opencode run`; start `opencode` (no arguments) in the kit directory and type
   the command there. **`creds set` is refused for the agent**: that is intended, run
   `python -m demo_smoke creds set NAME` in your own terminal (the value is prompted
-  without echo and lands in `.env`, which the agent cannot read).
+  without echo and lands in `.env`, which the agent's read tool and `cat`/`type` are denied).
 - Environment variables the CLI reads: `DEMO_SMOKE_CHROME`, `DEMO_SMOKE_FFMPEG`,
   `DEMO_SMOKE_FFPROBE`, `DEMO_SMOKE_BASE_URL` / `DEMO_SMOKE_MODEL` (defaults for
-  `--base-url` / `--model`), `DEMO_SMOKE_API_KEY` or `OPENAI_API_KEY` (bearer token
-  for the LLM endpoint), `DEMO_SMOKE_SCREEN_INDEX`, `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` /
+  `--base-url` / `--model`), `DEMO_SMOKE_API_KEY` (bearer token for the LLM endpoint, always
+  sent) or `OPENAI_API_KEY` (sent only to `https://` or non-loopback endpoints, so a key
+  exported for other tools never reaches a plain-http local server; `doctor`'s probes of the
+  local ports carry no token at all), `DEMO_SMOKE_SCREEN_INDEX`, `HF_HUB_CACHE` / `HUGGINGFACE_HUB_CACHE` /
   `HF_HOME` (that order), and `DEMO_SMOKE_DEBUG=1`, which turns one-line errors back into full
   tracebacks. For OpenCode itself: `OPENCODE_DISABLE_MODELS_FETCH=1` and
   `OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS` (see "The OpenCode path").
@@ -604,5 +615,6 @@ company's video host; the file needs no re-encoding.
   `opencode.json`, and the agent is denied web access, `prefetch` and `--online`.
   OpenCode does refresh its model catalog from `models.opencode.ai` on start unless
   `OPENCODE_DISABLE_MODELS_FETCH=1` is set (it is an environment flag, not a config
-  key; the README examples export it). The reference clip, screenshots and
-  recordings stay under `demo-output/` (gitignored).
+  key; the README examples export it). The reference clip stays where you recorded
+  it (`voices/`, gitignored via `*.wav`); screenshots and recordings stay under
+  `demo-output/` (gitignored).

@@ -256,7 +256,7 @@ def test_golden_path_commands_are_allowed(rulesets, interpreter):
 def test_golden_path_covers_every_new_command():
     cmds = " ".join(c for _, c in golden_commands())
     for sub in ("record-ref", "devices", "creds check", "creds set", "init-scenario",
-                "validate", "inspect", "check-model", "doctor", "dryrun", "narrate-validate",
+                "validate", "inspect", "doctor", "dryrun", "narrate-validate",
                 "narrate-template", "synth", "record", "edit", "verify", "voice-check", "run"):
         assert f"demo_smoke {sub}" in cmds, sub
 
@@ -282,6 +282,19 @@ def test_creds_set_is_denied(rulesets, interpreter, tail):
     "del demo-output\\x.mp4",
     "git push origin main",
     "git push",
+    # .env is denied to the read tool; the bash allow rules must not reopen it
+    "cat .env",
+    "cat .env.local",
+    "cat sub/.env",
+    "type .env",
+    "type .env.production",
+    "head .env",
+    "printenv DEMO_PASS",
+    "printenv",
+    "env",
+    "set",
+    "export",
+    "cp .env demo-output/x.txt",
 ])
 def test_denied_commands(rulesets, cmd):
     assert bash_action(rulesets, cmd, windows="\\" in cmd) == "deny"
@@ -324,6 +337,7 @@ def test_compound_commands_are_judged_per_command(rulesets):
     (".env.local", "deny"),
     ("sub/.env", "deny"),
     (".env.example", "allow"),
+    (".envrc", "deny"),
     ("scenarios/chat.json", "allow"),
     ("voices/nick.json", "allow"),
     ("demo-output/x/logs/doctor.json", "allow"),

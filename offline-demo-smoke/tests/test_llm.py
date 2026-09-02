@@ -75,6 +75,30 @@ def test_devtools_probe_bypasses_http_proxy(monkeypatch, tmp_path):
         srv.server_close()
 
 
+def test_bearer_token_rules(fake_llm, monkeypatch):
+    """OPENAI_API_KEY (often exported for unrelated tools) never goes in clear text to a local
+    plain-http server; DEMO_SMOKE_API_KEY is the explicit opt-in; doctor's probes carry nothing."""
+    monkeypatch.delenv("DEMO_SMOKE_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-unrelated")
+    fake_llm.queue.append({"content": "hi"})
+    llm.chat(fake_llm.base_url, "m", [{"role": "user", "content": "x"}])
+    assert "authorization" not in fake_llm.requests[-1]["headers"]
+    assert llm.reachable(fake_llm.base_url) and "authorization" not in fake_llm.gets[-1]["headers"]
+    assert llm._headers("https://api.example.com/v1/models")["Authorization"] == "Bearer sk-unrelated"
+    assert llm._headers("http://ollama.corp:11434/v1/models")["Authorization"] == "Bearer sk-unrelated"
+    for local in ("http://localhost:11434/v1", "http://127.0.0.1:1234/v1", "http://[::1]:8080/v1"):
+        assert "Authorization" not in llm._headers(local), local
+    monkeypatch.setenv("DEMO_SMOKE_API_KEY", "kit-key")
+    fake_llm.queue.append({"content": "hi"})
+    llm.chat(fake_llm.base_url, "m", [{"role": "user", "content": "x"}])
+    assert fake_llm.requests[-1]["headers"]["authorization"] == "Bearer kit-key"
+    assert llm.list_models(fake_llm.base_url) == ["fake-model"]
+    assert fake_llm.gets[-1]["headers"]["authorization"] == "Bearer kit-key"
+    eps = llm.probe_local_endpoints(endpoints=[("fake", fake_llm.base_url)])
+    assert eps[0]["reachable"] and eps[0]["models"] == ["fake-model"]
+    assert fake_llm.gets[-1]["path"].endswith("/v1/models") and "authorization" not in fake_llm.gets[-1]["headers"]
+
+
 def test_chat_sends_expected_body(fake_llm):
     fake_llm.queue.append({"content": "hi"})
     resp = llm.chat(fake_llm.base_url, "m1", [{"role": "user", "content": "x"}],

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from demo_smoke import dotenv, onboard_scenario
+from demo_smoke import cli, dotenv, onboard_scenario
 
 KIT = Path(__file__).resolve().parents[1]
 FAKES = KIT / "tests" / "fakes"
@@ -241,13 +241,40 @@ def test_load_env_sets_only_unset_names_and_resolves_op(fake_op, monkeypatch, en
     assert dotenv.load_env.unresolved == {}
 
 
-def test_load_env_keeps_raw_reference_when_op_missing(no_op, monkeypatch, env_file: Path):
+def test_load_env_does_not_export_an_unresolved_reference(no_op, monkeypatch, env_file: Path):
+    """The raw ``op://...`` string must never reach os.environ: drive.login would type it into the
+    password field and report the feature as broken (exit 2) instead of a missing credential."""
     env_file.parent.mkdir(parents=True)
-    env_file.write_text("DEMO_PASS=op://Private/Legion/password\n", encoding="utf-8")
-    monkeypatch.delenv("DEMO_PASS", raising=False)
-    assert dotenv.load_env(env_file) == {"DEMO_PASS": "op://Private/Legion/password"}
+    env_file.write_text("DEMO_USER=alice\nDEMO_PASS=op://Private/Legion/password\n", encoding="utf-8")
+    for name in ("DEMO_USER", "DEMO_PASS"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    assert dotenv.load_env(env_file) == {"DEMO_USER": "alice"}
+    assert "DEMO_PASS" not in os.environ and os.environ["DEMO_USER"] == "alice"
     assert "DEMO_PASS" in dotenv.load_env.unresolved
     assert "not on PATH" in dotenv.load_env.unresolved["DEMO_PASS"]
+
+
+def test_creds_via_cli_report_the_real_source_and_skip_env_loading(fake_op, monkeypatch, env_file: Path, capsys):
+    """``python -m demo_smoke creds ...`` goes through cli.main, whose .env pre-load would otherwise
+    turn every source into ``environ`` and unlock the vault just to store or list a name."""
+    env_file.parent.mkdir(parents=True)
+    env_file.write_text("DEMO_USER=alice\nDEMO_PASS=op://Private/Legion/password\n", encoding="utf-8")
+    for name in ("DEMO_USER", "DEMO_PASS", "NEW_ONE"):
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
+    assert cli.main(["creds", "check", "DEMO_USER", "DEMO_PASS", "--env-file", str(env_file)]) == 0
+    out = capsys.readouterr().out
+    assert "DEMO_USER: ok (.env)" in out and "DEMO_PASS: ok (op://)" in out
+    assert "DEMO_USER" not in os.environ and "DEMO_PASS" not in os.environ
+    # storing another name never resolves the existing op:// value (no vault prompt, no stderr line)
+    monkeypatch.setenv("FAKE_OP_FAIL", "vault locked")
+    _stdin(monkeypatch, "v\n")
+    assert cli.main(["creds", "set", "NEW_ONE", "--env-file", str(env_file), "--value-from-stdin"]) == 0
+    cap = capsys.readouterr()
+    assert "unresolved" not in cap.err and "vault locked" not in cap.err
+    assert cli.main(["creds", "list", "--env-file", str(env_file)]) == 0
+    assert "NEW_ONE" in capsys.readouterr().out and "NEW_ONE" not in os.environ
 
 
 def test_load_env_missing_file_is_noop(tmp_path: Path):

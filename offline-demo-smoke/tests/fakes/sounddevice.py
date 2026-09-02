@@ -13,7 +13,12 @@ Knobs live in ``config`` (call ``reset()`` between tests):
 * ``speech_seconds`` how much of the take contains speech (default: everything but the padding)
 * ``pad_s``          silence on each side (default 1.0)
 * ``fail``           make ``rec`` raise PortAudioError (to exercise the ffmpeg fallback)
+* ``rate_ok``        when set, ``rec`` raises PortAudioError unless ``samplerate`` equals it
+                     (a 44.1 kHz-only USB microphone on CoreAudio)
 * ``seed``           RNG seed
+
+``InputStream`` records every open in ``primed`` (record-ref primes the input once
+before the countdown); ``query_hostapis`` returns one host API.
 """
 
 from __future__ import annotations
@@ -23,9 +28,11 @@ import numpy as np
 __version__ = "0.0-fake"
 
 DEFAULTS = {"noise_db": -65.0, "speech_db": -20.0, "speech_seconds": None, "pad_s": 1.0,
-            "fail": False, "seed": 1234}
+            "fail": False, "rate_ok": None, "seed": 1234}
 config: dict = dict(DEFAULTS)
 calls: list[dict] = []
+primed: list[dict] = []
+HOSTAPIS = [{"name": "Fake Audio", "devices": [0, 1, 2], "default_input_device": 0}]
 
 DEVICES = [
     {"name": "Built-in Microphone", "max_input_channels": 2, "max_output_channels": 0,
@@ -56,6 +63,7 @@ def reset() -> None:
     config.clear()
     config.update(DEFAULTS)
     calls.clear()
+    primed.clear()
     default.device = [0, 1]
 
 
@@ -63,6 +71,27 @@ def query_devices(device=None, kind=None):
     if device is not None:
         return dict(DEVICES[int(device)])
     return [dict(d) for d in DEVICES]
+
+
+def query_hostapis(index=None):
+    if index is not None:
+        return dict(HOSTAPIS[int(index)])
+    return [dict(a) for a in HOSTAPIS]
+
+
+class InputStream:
+    """Opened and closed once by record-ref before the countdown (mic permission / driver start)."""
+
+    def __init__(self, samplerate=None, channels=1, dtype="float32", device=None, **kw):
+        primed.append({"samplerate": samplerate, "channels": channels, "dtype": dtype, "device": device})
+        if config.get("fail"):
+            raise PortAudioError("Error opening InputStream: Invalid device (fake)")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
 
 def band_limited_noise(n: int, sr: int, lo: float, hi: float, rng) -> np.ndarray:
@@ -102,6 +131,8 @@ def rec(frames=None, samplerate=None, channels=1, dtype="float32", device=None, 
                   "dtype": dtype, "device": device})
     if config.get("fail"):
         raise PortAudioError("Error opening InputStream: Invalid device (fake)")
+    if config.get("rate_ok") and int(samplerate or 0) != int(config["rate_ok"]):
+        raise PortAudioError(f"Error opening InputStream: Invalid sample rate (fake, wants {config['rate_ok']})")
     sr = int(samplerate or 48000)
     seconds = float(frames) / sr
     data = synth_recording(seconds, sr, noise_db=config["noise_db"], speech_db=config["speech_db"],

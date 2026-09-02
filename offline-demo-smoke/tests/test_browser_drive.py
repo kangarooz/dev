@@ -73,7 +73,28 @@ def test_login_reports_missing_env(monkeypatch):
     err = drive.login(None, scenario)
     assert err == "login: environment variable DEMO_SMOKE_MISSING_USER is not set"
     assert drive.login(None, {"login": {"type": "none"}}) is None
-    assert "unsupported" in drive.login(None, {"login": {"type": "oauth"}})
+    monkeypatch.setenv("DEMO_SMOKE_MISSING_USER", "u")
+    monkeypatch.setenv("DEMO_SMOKE_MISSING_PASS", "p")
+    assert "unsupported" in drive.login(None, {"login": {"type": "oauth", "username_env": "DEMO_SMOKE_MISSING_USER",
+                                                         "password_env": "DEMO_SMOKE_MISSING_PASS"}})
+    # literal credentials in the scenario file are refused, not silently used
+    err = drive.login(None, {"app_url": "http://x", "login": {"type": "basic", "username": "u", "password": "p"}})
+    assert err == "login: username_env and password_env are required (credentials never come from the scenario file)"
+    err = drive.login(None, {"app_url": "http://x", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER"}})
+    assert "username_env and password_env are required" in err
+    # an op:// reference that reached the environment unresolved is not typed into the app
+    monkeypatch.setenv("DEMO_SMOKE_MISSING_PASS", "op://Private/Legion/password")
+    err = drive.login(None, {"app_url": "http://x", "login": {"type": "form", "username_env": "DEMO_SMOKE_MISSING_USER",
+                                                             "password_env": "DEMO_SMOKE_MISSING_PASS"}})
+    assert err == ("login: DEMO_SMOKE_MISSING_PASS is an unresolved op:// reference "
+                   "(run `python -m demo_smoke creds check DEMO_SMOKE_MISSING_PASS`)")
+
+
+def test_origin_comparison_fills_default_ports():
+    assert drive._origin("http://Host") == drive._origin("http://host:80/x?y")
+    assert drive._origin("https://host") == ("https", "host", 443)
+    assert drive._origin("http://host:8000") != drive._origin("http://host:8001")
+    assert drive._origin("http://host") != drive._origin("https://host")
 
 
 # --------------------------------------------------------------------------- browser
@@ -158,6 +179,53 @@ def test_dryrun_basic_auth(tmp_path, monkeypatch):
         scenario["login"] = {"type": "basic", "username_env": "DEMO_SMOKE_USER", "password_env": "DEMO_SMOKE_PASS"}
         result = drive.dryrun(scenario, tmp_path, headless=True)
     assert result["verdict"] == "PASS", [s["error"] for s in result["steps"]]
+
+
+def test_basic_auth_header_stays_on_the_app_origin(tmp_path, monkeypatch):
+    """The Basic token goes to app_url's origin only: a second server (a CDN, analytics, any third
+    party the app loads) must never see it."""
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    _need_chrome()
+    seen: list[dict] = []
+
+    class Other(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            seen.append({"path": self.path, "authorization": self.headers.get("Authorization")})
+            body = b"<p id='other'>other origin</p>"
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    other_srv = ThreadingHTTPServer(("127.0.0.1", 0), Other)
+    Thread(target=other_srv.serve_forever, daemon=True).start()
+    other = f"http://127.0.0.1:{other_srv.server_address[1]}"
+    monkeypatch.setenv("DEMO_SMOKE_USER", "demo")
+    monkeypatch.setenv("DEMO_SMOKE_PASS", "secret")
+    try:
+        with _serve_dir()(APP_DIR, basic_auth=("demo", "secret")) as base, \
+                chrome.launch(tmp_path, {"width": 640, "height": 480}, headless=True) as session:
+            page = session.page
+            scenario = {"app_url": base, "login": {"type": "basic", "username_env": "DEMO_SMOKE_USER",
+                                                   "password_env": "DEMO_SMOKE_PASS"}}
+            assert drive.login(page, scenario) is None
+            page.goto(base + "/", wait_until="load")
+            assert "Sign in required" not in page.content()          # the app itself got the token
+            page.evaluate("u => fetch(u).then(r => r.text())", other + "/asset.js")   # a cross-origin sub-resource
+            page.goto(other + "/page", wait_until="load")                              # and a cross-origin navigation
+            assert "other origin" in page.content()
+    finally:
+        other_srv.shutdown()
+        other_srv.server_close()
+    assert {s["path"] for s in seen} == {"/asset.js", "/page"}
+    assert all(s["authorization"] is None for s in seen), seen
 
 
 def test_selector_expectation_counts_visible_elements_only(tmp_path):
